@@ -1,6 +1,15 @@
 LLVM Thread Coarsening Pass for OpenCL
 ======================================
 
+
+Disclaimer
+----------
+
+This repository is an extension of [Alberto Magni's][email/alberto] [thread coarsening pass][www/originalCoarsening].
+The extension adds safe, fully automated coarsening factor selection for NVIDIA GPUs.
+
+All rights of the original coarsening pass, as retained in the initial commit, remain with the author. All further commits are our own work.
+
 Content
 -------
 
@@ -40,7 +49,12 @@ and then rebase both to the specified versions.
 Publications
 ------------
 
-The coarsening pass has been used for the following publications:
+The autocoarsening extension is described in:
+
+* [TACO] Predictable Thread Coarsening
+Nicolai Stawinoga, Tony Field (15(2):23, June 2018)
+
+The original coarsening pass has been used for the following publications:
 
 * [SC13] A Large-Scale Cross-Architecture Evaluation of Thread-Coarsening
 Alberto Magni, Christophe Dubach, Michael O'Boyle 
@@ -49,10 +63,12 @@ Alberto Magni, Christophe Dubach, Michael O'Boyle
 * [PACT2014] Automatic Optimization of Thread-Coarsening for Graphics Processors
 Alberto Magni, Christophe Dubach, Michael O'Boyle 
 
-The papers used an older version of the pass for LLVM 3.4.
+These papers used an older version of the pass for LLVM 3.4.
 
-For any question please contact [Alberto Magni][email/alberto].
+For any question please contact [Nicolai Stawinoga][email/nicolai].
 
+[email/nicolai]: n.stawinoga13@imperial.ac.uk
 [email/alberto]: a.magni@sms.ed.ac.uk
+[www/originalCoarsening]: https://github.com/HariSeldon/coarsening_pass
 [www/llvmProject]: http://llvm.org/docs/Projects.html
 [www/llvmGit]: http://llvm.org/docs/GettingStarted.html#git-mirror 
