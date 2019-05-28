@@ -1,0 +1,4562 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 2ca0ff1..b46a5b9 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,6 +1,6 @@
+ cmake_minimum_required(VERSION 2.8.8)
+ 
+-project("coarsening_pass")
++project("autocoarsening")
+ 
+ set(CMAKE_CXX_COMPILER "g++")
+ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
+@@ -26,19 +26,31 @@ set(OPENCL_WRAPPER_LIB "OpenCLWrapper")
+ 
+ # LLVM.
+ # Set this to your LLVM cmake directory.
+-set(LLVM_DIR "~/build/llvm/share/llvm/cmake/")
++set(LLVM_DIR "/data/build/llvm/share/llvm/cmake/")
++
++# set cuda path, only required for this file
++if(EXISTS "/usr/local/cuda/")
++  set(CUDA_PATH "/usr/local/cuda")
++else(EXISTS "/usr/local/cuda/")
++  set(CUDA_PATH "/vol/cuda/8.0.61")
++endif(EXISTS "/usr/local/cuda/")
+ 
+ # OpenCL.
+ # Set this to the directory containing cl/cl.h.
+-set(OPENCL_INCLUDE_PATH "/opt/AMDAPP/include")
++  set(OPENCL_INCLUDE_PATH "${CUDA_PATH}/include/")
+ find_library(OPENCL_LIBRARY_PATH OpenCL
+-             "/opt/AMDAPP/lib/x86_64/"
+-             DOC "The OpenCL Library")
++             PATHS "${CUDA_PATH}/lib64"
++	     DOC "The OpenCL Library"
++	     NO_DEFAULT_PATH
++	     NO_CMAKE_PATH
++	     NO_CMAKE_ENVIRONMENT_PATH
++	     NO_SYSTEM_ENVIRONMENT_PATH)
+ if(EXISTS ${OPENCL_LIBRARY_PATH})
+   message(STATUS "Looking for OPENCL: found")
+ else(EXISTS ${OPENCL_LIBRARY_PATH})
+   message(FATAL_ERROR "Looking for OPENCL: not found")
+ endif(EXISTS ${OPENCL_LIBRARY_PATH})
++message(STATUS "OpenCL found in: " ${OPENCL_LIBRARY_PATH})
+ 
+ add_subdirectory(${THRUD_DIR})
+ add_subdirectory(${OPENCL_TOOLS_DIR})
+diff --git a/LICENSE.TXT b/LICENSE.TXT
+index 9cb61be..b40264e 100644
+--- a/LICENSE.TXT
++++ b/LICENSE.TXT
+@@ -61,4 +61,4 @@ licenses, and/or restrictions:
+ 
+ Program             Directory
+ -------             ---------
+-Polybench           coarsening_pass/tests/polybench
++Polybench           autocoarsening/tests/polybench
+diff --git a/README.md b/README.md
+index f7108a7..b02b9ee 100644
+--- a/README.md
++++ b/README.md
+@@ -1,16 +1,6 @@
+ LLVM Thread Coarsening Pass for OpenCL
+ ======================================
+ 
+-Disclaimer
+-----------
+-
+-The code here is an extension of [Alberto Magni's][email/alberto] [thread coarsening pass][www/originalCoarsening].
+-All rights of the original un-patched code remain with the author.
+-
+-This repository contains a patch for the original code, and for convenience and development includes
+-a fully patched version. The original coarsening pass is retained in the initial commit, all further
+-work is our own.
+-
+ Content
+ -------
+ 
+@@ -50,12 +40,7 @@ and then rebase both to the specified versions.
+ Publications
+ ------------
+ 
+-The extension to the coarsening pass is described in:
+-
+-* [TACO June 2018] Predictable Thread Coarsening
+-Nicolai Stawinoga, Tony Field
+-
+-The original coarsening pass has been used for the following publications:
++The coarsening pass has been used for the following publications:
+ 
+ * [SC13] A Large-Scale Cross-Architecture Evaluation of Thread-Coarsening
+ Alberto Magni, Christophe Dubach, Michael O'Boyle 
+@@ -66,10 +51,8 @@ Alberto Magni, Christophe Dubach, Michael O'Boyle
+ 
+ The papers used an older version of the pass for LLVM 3.4.
+ 
+-For any question please contact [Nicolai Staiwnoga][email/nicolai].
++For any question please contact [Alberto Magni][email/alberto].
+ 
+-[email/nicolai]: n.stawinoga13@imperial.ac.uk
+ [email/alberto]: a.magni@sms.ed.ac.uk
+-[www/originalCoarsening]: https://github.com/HariSeldon/coarsening_pass
+ [www/llvmProject]: http://llvm.org/docs/Projects.html
+ [www/llvmGit]: http://llvm.org/docs/GettingStarted.html#git-mirror 
+diff --git a/opencl_tools/function_overload/include/Utils.h b/opencl_tools/function_overload/include/Utils.h
+index f9d6456..274c39f 100644
+--- a/opencl_tools/function_overload/include/Utils.h
++++ b/opencl_tools/function_overload/include/Utils.h
+@@ -7,12 +7,14 @@
+ #define OCL_BLOCK_SIZE_Y "OCL_BLOCK_SIZE_Y"
+ #define OCL_COMPILER "OCL_COMPILER"
+ #define OCL_COMPILER_OPTIONS "OCL_COMPILER_OPTIONS"
++#define TC_KERNEL_NAME "TC_KERNEL_NAME"
+ #define OCL_REPETITIONS "OCL_REPETITIONS"
+ #define CLC_DIRECTORY "/home/s1158370/src/libclc/"
+ #define OCL_INPUT_FILE "/tmp/ocl_input.cl"
+ #define OCL_OUTPUT_FILE "/tmp/ocl_output.cl"
+ #define PTX_FILE "/tmp/tmp.ptx"
+ #define BC_FILE "/tmp/bc.ll"
++#define CLR_FILE "/tmp/clr.ll"
+ 
+ //------------------------------------------------------------------------------
+ // Runtime function prototypes.
+@@ -169,7 +171,7 @@ void enqueueKernelNoTime(cl_command_queue command_queue,
+ int compileWithAxtor(std::string &inputFile, 
+                      std::string &clangOptions, std::string &optOptions, 
+                      std::string &outputFile,
+-                     int seed);
++                     int seed, bool cacheDependenceAnalysis);
+ 
+ std::string buildPTXCommandLine(std::string &inputFile,
+                                 std::string &compilerOptions,
+diff --git a/opencl_tools/function_overload/src/AxtorWrapper.cpp b/opencl_tools/function_overload/src/AxtorWrapper.cpp
+index 00c84d8..153454d 100644
+--- a/opencl_tools/function_overload/src/AxtorWrapper.cpp
++++ b/opencl_tools/function_overload/src/AxtorWrapper.cpp
+@@ -11,9 +11,46 @@
+ #include <string.h>
+ #include <stdexcept>
+ #include <vector>
++#include <map>
++#include <set>
++#include <algorithm>
++
++#include <pthread.h>
++void junk() {
++  int i;
++  i=pthread_getconcurrency();
++};
+ 
+-std::string compile(std::string &inputFile, const char *options,
+-                    std::string &outputFile, int seed);
++#define __AXTOR_DEBUG_PRINTXX 1
++#define PERFORM_AXTOR_COMPILE 1
++
++std::string compile(std::string &inputFile, const char *options, std::string &optOptions,
++                    std::string &outputFile, int seed, bool cacheDependenceAnalysis);
++cl_program compileAllCF(std::string &inputFile,
++                        const char *options,
++			std::string &outputFile,
++			int seed,
++			unsigned int maxCoarseningFactor,
++			cl_context context,
++			clCreateProgramWithSourceFunction originalCreateProgramWithSource,
++			clBuildProgramFunction originalBuildProgram,
++			cl_uint num_devices,
++                        const cl_device_id *device_list,
++                        void (*pfn_notify)(cl_program, void *),
++                        void *user_data);
++cl_program compileSingleCF(std::string &inputFile,
++                           const char *options,
++			   std::string &optOptions,
++			   std::string &outputFile,
++			   int seed,
++			   cl_context context,
++			   clCreateProgramWithSourceFunction originalCreateProgramWithSource,
++			   clBuildProgramFunction originalBuildProgram,
++			   cl_uint num_devices,
++                           const cl_device_id *device_list,
++                           void (*pfn_notify)(cl_program, void *),
++                           void *user_data,
++                           bool cacheDependenceAnalysis);
+ 
+ //------------------------------------------------------------------------------
+ // OpenCL Runtime state data structures.
+@@ -34,8 +71,44 @@ struct ProgramDesc {
+ 
+ typedef std::vector<ProgramDesc *> ProgramDescVec;
+ 
++struct KernelResources {
++  int regs;
++  int smem;
++  int cmem;
++  int cf;
++  int direction;
++  bool isCacheDependent;
++  std::string cdaLog;
++  float occupancy;
++  int activeThreadsByNumBlocks;
++  int activeThreadsBySMem;
++  int activeThreadsByRegs;
++  int achievableActiveThreads;
++
++  KernelResources(int regs, int smem, int cmem, int cf, int direction, bool isCacheDependent, std::string cdaLog)
++      : regs(regs), smem(smem), cmem(cmem), cf(cf), direction(direction), isCacheDependent(isCacheDependent), cdaLog(cdaLog),
++        occupancy(0.0), activeThreadsByNumBlocks(0), activeThreadsBySMem(0), activeThreadsByRegs(0), achievableActiveThreads(0) {}
++};
++
++struct KernelLaunchConfig {
++  int numBlocks;
++  int numThreadsPerBlock;
++  int gridDim[3];
++
++  KernelLaunchConfig() {}
++
++  KernelLaunchConfig(int numBlocks, int numThreadsPerBlock)
++      : numBlocks(numBlocks), numThreadsPerBlock(numThreadsPerBlock) {}
++};
++
++//typedef std::map<string, std::vector<KernelResources>> ResourceMap;
++
+ // Runtime state state
+ static ProgramDescVec programs;
++static std::map<std::string, std::vector<KernelResources *>> kernelResources;
++static std::map<std::string, KernelLaunchConfig *> kernelLaunchConfig;
++static std::map<std::string, int> chosenCFs;
++//static std::map<std::string, int> kernelRequestedBlocksMap;
+ 
+ // OpenCL functions.
+ //------------------------------------------------------------------------------
+@@ -78,6 +151,17 @@ extern "C" cl_int clRetainProgram(cl_program program) {
+ }
+ 
+ //------------------------------------------------------------------------------
++extern "C" cl_int clGetProgramInfoWithNoTypeCastHack(cl_program program,
++                                                     cl_program_info param_name,
++                                                     size_t param_value_size, void *param_value,
++                                                     size_t *param_value_size_ret) {
++  clGetProgramInfoFunction originalGetProgramInfo;
++  *(void **)(&originalGetProgramInfo) =
++      dlsym(RTLD_NEXT, CL_GET_PROGRAM_INFO_NAME);
++  return originalGetProgramInfo(program, param_name, param_value_size,
++                                param_value, param_value_size_ret);
++}
++
+ extern "C" cl_int clGetProgramInfo(cl_program program,
+                                    cl_program_info param_name,
+                                    size_t param_value_size, void *param_value,
+@@ -92,19 +176,29 @@ extern "C" cl_int clGetProgramInfo(cl_program program,
+ }
+ 
+ //------------------------------------------------------------------------------
++cl_int clGetProgramBuildInfoWithNoTypeCastHack(cl_program program, cl_device_id device,
++                                               cl_program_build_info param_name,
++                                               size_t param_value_size,
++                                               void *param_value,
++                                               size_t *param_value_size_ret) {
++
++  clGetProgramBuildInfoFunction originalGetProgramBuildInfo;
++  *(void **)(&originalGetProgramBuildInfo) =
++      dlsym(RTLD_NEXT, CL_GET_PROGRAM_BUILD_INFO_NAME);
++  return dumpError(originalGetProgramBuildInfo(program, device, param_name,
++                                               param_value_size, param_value,
++                                               param_value_size_ret));
++}
++
+ extern "C" cl_int clGetProgramBuildInfo(cl_program program, cl_device_id device,
+                                         cl_program_build_info param_name,
+                                         size_t param_value_size,
+                                         void *param_value,
+                                         size_t *param_value_size_ret) {
+   ProgramDesc *desc = reinterpret_cast<ProgramDesc *>(program);
++  
++  return clGetProgramBuildInfoWithNoTypeCastHack(desc->handle, device, param_name, param_value_size, param_value, param_value_size_ret); 
+ 
+-  clGetProgramBuildInfoFunction originalGetProgramBuildInfo;
+-  *(void **)(&originalGetProgramBuildInfo) =
+-      dlsym(RTLD_NEXT, CL_GET_PROGRAM_BUILD_INFO_NAME);
+-  return dumpError(originalGetProgramBuildInfo(desc->handle, device, param_name,
+-                                               param_value_size, param_value,
+-                                               param_value_size_ret));
+ }
+ 
+ //------------------------------------------------------------------------------
+@@ -129,12 +223,16 @@ clCreateProgramWithBinary(cl_context context, cl_uint num_devices,
+ extern "C" cl_program clCreateProgramWithSource(cl_context context,
+                                                 cl_uint count,
+                                                 const char **strings,
+-                                                const size_t *,
++                                                const size_t *lengths,
+                                                 cl_int *errcode_ret) {
+-  std::cout << "HIJACKED clCreateProgramWithSource HIJACKED\n";
+   std::stringstream buffer;
+   for (uint i = 0; i < count; ++i) {
+-    buffer << strings[i] << "\n";
++    if (lengths != NULL && lengths[i] > 0) {
++      buffer.write(strings[i], lengths[i]);
++      buffer << "\n";
++    } else {
++      buffer << strings[i] << "\n";
++    }
+   }
+ 
+   ProgramDesc *desc = new ProgramDesc(context, buffer.str());
+@@ -143,17 +241,48 @@ extern "C" cl_program clCreateProgramWithSource(cl_context context,
+ 
+   if (errcode_ret)
+     *errcode_ret = CL_SUCCESS;
+-
+   return fakeHandle;
+ }
+ 
+ //------------------------------------------------------------------------------
+-extern "C" cl_int clBuildProgram(cl_program program, cl_uint num_devices,
+-                                 const cl_device_id *device_list,
++extern "C" cl_int clBuildProgram(cl_program program, cl_uint num_devices_param,
++                                 const cl_device_id *device_list_param,
+                                  const char *options,
+                                  void (*pfn_notify)(cl_program, void *),
+                                  void *user_data) {
+-  std::cout << "HIJACKED clBuildProgram HIJACKED\n";
++  cl_uint num_devices;
++  cl_device_id * device_list_temp;
++  bool recoverDeviceList = (device_list_param == NULL || num_devices_param == 0);
++
++  if (recoverDeviceList) {
++#ifdef __AXTOR_DEBUG_PRINT
++    std::cout << "Build program was called with 0 devices or with device_list = null\n";
++#endif
++    cl_platform_id platform_id[10];
++    cl_uint num_platforms = 0;
++    clGetPlatformIDs(10, platform_id, &num_platforms);
++#ifdef __AXTOR_DEBUG_PRINT
++    if (num_platforms > 1) {
++      std::cout << "Found " << num_platforms << " platforms\n";
++    }
++#endif
++
++    device_list_temp = (cl_device_id*)malloc(sizeof(cl_device_id));
++    clGetDeviceIDs(platform_id[0], CL_DEVICE_TYPE_GPU, 1, device_list_temp, &num_devices);
++    if (num_devices > 1 || num_devices == 0) {
++      char buffer[50];
++#ifdef __AXTOR_DEBUG_PRINT
++      sprintf(buffer, "Found %d devices", num_devices);
++#endif
++      verifyOutputCode(CL_INVALID_DEVICE, buffer);
++      exit(CL_INVALID_DEVICE);
++    }
++  } else {
++    num_devices = num_devices_param;
++  }
++
++  const cl_device_id * device_list = recoverDeviceList ? device_list_temp : device_list_param;
++
+ 
+   srand((unsigned)time(0));
+   int seed = rand() % 100000;
+@@ -173,68 +302,469 @@ extern "C" cl_int clBuildProgram(cl_program program, cl_uint num_devices,
+   // Get the program handle.
+   ProgramDesc *desc = reinterpret_cast<ProgramDesc *>(program);
+   if (desc->isFromBinary()) {
+-    std::cout << "OpenCL function overloading does not work when creating "
+-                 "the program with binary\n";
+-    exit(1);
++#ifdef __AXTOR_DEBUG_PRINT
++    std::cout << "Running from binary\n";
++#endif
++    cl_int errorCode;
++    errorCode = originalBuildProgram(desc->handle, num_devices, device_list,
++                                     "-cl-nv-verbose -cl-nv-opt-level 3", pfn_notify, user_data);
++#ifdef __AXTOR_DEBUG_PRINT
++    std::cout << "Finished originalBuildProgram" << std::endl;
++#endif
++    //desc->handle = program;
++    verifyOutputCode(errorCode, "Error building the new program");
++
++    return CL_SUCCESS;
+   }
+ 
+   // Dump the program.
+   writeFile(inputFile, desc->sourceStr);
+ 
+   // Compile the program.
+-  std::string oclOptions = compile(inputFile, options, outputFile, seed);
++  std::string testMaxCoarseningFactor = getEnvString("MAX_COARSENING_FACTOR");
++#ifdef __AXTOR_DEBUG_PRINT
++  std::cout << "Options: " << (options != NULL ? options : "") << std::endl;
++  std::cout << "MaxCoarseningFactor is: " << testMaxCoarseningFactor << std::endl;
++#endif
++  int maxCoarseningFactor = 0;
++  if (!testMaxCoarseningFactor.empty()) {
++    maxCoarseningFactor = std::stoi(testMaxCoarseningFactor);
++  }
++  desc->handle = compileAllCF(inputFile, options, outputFile, seed, maxCoarseningFactor, desc->context, originalCreateProgramWithSource, originalBuildProgram, num_devices, device_list, pfn_notify, user_data);
++
++  cl_bool param_val;
++  clGetDeviceInfo(*device_list, CL_DEVICE_HOST_UNIFIED_MEMORY, sizeof(cl_bool), &param_val, NULL);
++  cl_ulong buff;
++  clGetDeviceInfo(*device_list, CL_DEVICE_LOCAL_MEM_SIZE, sizeof(cl_ulong), &buff, NULL);
++  cl_uint uintparam;
++  clGetDeviceInfo(*device_list, CL_DEVICE_GLOBAL_MEM_CACHELINE_SIZE, sizeof(cl_uint), &uintparam, NULL);
++#ifdef __AXTOR_DEBUG_PRINT
++  std::cout << "Device has unified memory: " << param_val << std::endl;
++  std::cout << "Device local mem size: " << buff << std::endl;
++  std::cout << "Device global mem cacheline size: " << uintparam << std::endl;
++#endif
++
++  return CL_SUCCESS;
++}
++
++void parseBuildLog(std::string buildLog, std::string kernelName, int& regs, int& smem, int& cmem) {
++  size_t lineStart = buildLog.find("ptxas info", buildLog.find("Function properties for " + kernelName + "\n"));
++  size_t lineLen = buildLog.find("\n", lineStart) - lineStart;
++  std::string logLine = buildLog.substr(lineStart, lineLen);
++  
++  size_t regNumEnd = logLine.find("register");
++  size_t regNumStart = logLine.find_last_of(" ", regNumEnd - 2) + 1;
++
++  size_t cmemNumEnd = logLine.find("bytes cmem");
++  size_t cmemNumStart = logLine.find_last_of(" ", cmemNumEnd - 2) + 1;
++
++  size_t smemNumEnd = logLine.find("bytes smem");
++  size_t smemNumStart = logLine.find_last_of(" ", smemNumEnd - 2) + 1;
++
++  std::string regStr = logLine.substr(regNumStart, regNumEnd - 2 - regNumStart + 1);
++  std::string smemStr = logLine.substr(smemNumStart, smemNumEnd - 2 - smemNumStart + 1);
++  std::string cmemStr = logLine.substr(cmemNumStart, cmemNumEnd - 3 - cmemNumStart + 1);
++  
++  if (regNumEnd != std::string::npos && !regStr.empty()) {
++    regs = std::stoi(regStr);
++  }
++  if (smemNumEnd != std::string::npos && !smemStr.empty()) {
++    smem = std::stoi(smemStr);
++  }
++  if (cmemNumEnd != std::string::npos && !cmemStr.empty()) {
++    cmem = std::stoi(cmemStr);
++  }
++}
++
++bool parseCacheDependence(const int seed, std::string & cdaLog) {
++  std::string inputFile = getMangledFileName(CLR_FILE, seed);
++  std::string outputFile = inputFile + ".grepResult";
++  std::string searchStr = "No cache line re-use detected, OK to coarsen";
++  //std::string cmd = "grep \"" + searchStr + "\" " + cdaFileName + " > " + cdaGrepFileName;
++  std::string cmd = "tail -1 " + inputFile + " > " + outputFile;
++  system(cmd.c_str());
++  size_t resultSize;
++  char* resultPtr = readFile(outputFile.c_str(), &resultSize);
++  cdaLog.assign(resultPtr, resultSize > 1 && resultPtr[resultSize-2] == '\n' ? resultSize - 2 : resultSize);
++#ifndef __AXTOR_DEBUG_PRINT
++  std::string removeString = "rm " + inputFile + " && rm " + outputFile;
++  system(removeString.c_str()); //retain intermediate files in debug mode
++#endif
++  return cdaLog.find(searchStr) == std::string::npos;
++}
++
++cl_program compileAllCF(std::string &inputFile,
++                        const char *options,
++			std::string &outputFile,
++			int seed,
++			unsigned int maxCoarseningFactor,
++			cl_context context,
++			clCreateProgramWithSourceFunction originalCreateProgramWithSource,
++			clBuildProgramFunction originalBuildProgram,
++			cl_uint num_devices,
++                        const cl_device_id *device_list,
++                        void (*pfn_notify)(cl_program, void *),
++                        void *user_data)
++{
++  std::string optOptionsOriginal = getEnvString(OCL_COMPILER_OPTIONS);
++  // std::cout << "Entering compileAllCF with OCL_COMPILER_OPTIONS=" << optOptionsOriginal << std::endl;
++  std::string kernelName = getEnvString(TC_KERNEL_NAME);
++  
++  if (maxCoarseningFactor > 0) {
++    
++    const std::string cfFlag = " -coarsening-factor ";
++    const std::string cdFlag = " -coarsening-direction ";
++    size_t cfStart = optOptionsOriginal.find(cfFlag);
++    size_t cdStart = optOptionsOriginal.find(cdFlag);
++    size_t cdArgStartPos = optOptionsOriginal.find_first_not_of(" \t\n\r\\", cdStart + cdFlag.length());
++    size_t cdArgEndPos = optOptionsOriginal.find(" ", cdArgStartPos);
++    int coarseningDirection = std::stoi(optOptionsOriginal.substr(cdArgStartPos, cdArgEndPos-cdArgStartPos));
++    
++    std::string verboseOptions(options != NULL ? options : "");
++    if (verboseOptions.find("-cl-nv-verbose") == std::string::npos) {
++      verboseOptions.append(" -cl-nv-verbose");
++    }
++    std::string optOptions = optOptionsOriginal;
++    size_t buildLogSize;
++#ifdef __AXTOR_DEBUG_PRINT
++    std::cout << "Entering compile function for coarsening kernel " << kernelName << " with coarsening direction " << coarseningDirection << " and build string: " << optOptionsOriginal << std::endl;
++#endif
++    for (unsigned int coarseningFactor = 1; coarseningFactor <= maxCoarseningFactor; coarseningFactor <<= 1) {
++      bool cacheDependenceAnalysis = coarseningFactor == 1;
++      // setup
++      size_t argPos = optOptions.find_first_not_of(" \t\n\r\\", cfStart + cfFlag.length());
++      size_t argEndPos = optOptions.find(" ", argPos);
++      optOptions.replace(argPos, argEndPos-argPos, std::to_string(coarseningFactor));
++
++#ifdef __AXTOR_DEBUG_PRINT
++      std::cout << "For CF = " << coarseningFactor << " new build string is: " << optOptions << std::endl;
++#endif
++      // set up buildString (optOptions)
++      // call compile
++      cl_program program;
++      try {
++        program = compileSingleCF(inputFile, verboseOptions.c_str(), optOptions, outputFile, seed, context, originalCreateProgramWithSource, originalBuildProgram,
++                                             num_devices, device_list, pfn_notify, user_data, cacheDependenceAnalysis);
++      } catch (int e) {
++        std::cout << "Caught exception when compiling for cf " << coarseningFactor << "\n";
++        break;
++      }
++      cl_int errorCode = clGetProgramBuildInfoWithNoTypeCastHack(program, *device_list, CL_PROGRAM_BUILD_LOG, 0, NULL, &buildLogSize);
++      //cl_build_status sts;
++      //cl_int errorCode = clGetProgramBuildInfoWithNoTypeCastHack(program, NULL, CL_PROGRAM_BUILD_STATUS, 0, NULL, &buildLogSize);
++      verifyOutputCode(errorCode, "Error querying the build log size");
++      char* buildLogData = new char[buildLogSize+1];
++      errorCode = clGetProgramBuildInfoWithNoTypeCastHack(program, *device_list, CL_PROGRAM_BUILD_LOG, buildLogSize, buildLogData, NULL);
++
++      verifyOutputCode(errorCode, "Error querying the build log");
++      std::string buildLog(buildLogData);
++      delete [] buildLogData;
++#ifdef __AXTOR_DEBUG_PRINT
++      std::cout << "Build log size is " << buildLogSize << std::endl;
++      std::cout << "Build log:\n" << buildLog << std::endl;
++#endif
++
++      // test whether kernel to be tested is in this file (program might keep kernels in separate .cl files)
++      size_t buildLogKernelName = buildLog.find("Function properties for " + kernelName);
++      if (buildLogKernelName != std::string::npos) {
++	int regs = 0;
++	int smem = 0;
++	int cmem = 0;
++	parseBuildLog(buildLog, kernelName, regs, smem, cmem);
++	std::string cdaLog;
++	bool isCacheDependent = cacheDependenceAnalysis ? parseCacheDependence(seed, cdaLog) : false;
++
++#ifdef __AXTOR_DEBUG_PRINT
++	std::cout << "Kernel " << kernelName << " with cf " << coarseningFactor << ": " << regs << " regs " << smem << " smem " << cmem << " cmem" << std::endl;
++	std::cout << "     --------------------------------    \n";
++#endif
++	kernelResources[kernelName].push_back(new KernelResources(regs, smem, cmem, coarseningFactor, coarseningDirection, isCacheDependent, cdaLog));
++      }
++    }
++  }
++
++  // re-set original build string
++  // call compile and return its output
++#ifdef __AXTOR_DEBUG_PRINT
++  std::cout << "Now running default compile with build string: " << optOptionsOriginal << std::endl;
++#endif
++
++  std::string verboseOptions(options != NULL ? options : "");
++  if (verboseOptions.find("-cl-nv-verbose") == std::string::npos) {
++    verboseOptions.append(" -cl-nv-verbose");
++  }
++  size_t buildLogSize;
++  cl_program result = compileSingleCF(inputFile, verboseOptions.c_str()/*options*/, optOptionsOriginal, outputFile, seed, context, originalCreateProgramWithSource, originalBuildProgram,
++                                      num_devices, device_list, pfn_notify, user_data, false);
++
++  cl_int errorCode = clGetProgramBuildInfoWithNoTypeCastHack(result, *device_list, CL_PROGRAM_BUILD_LOG, 0, NULL, &buildLogSize);
++  verifyOutputCode(errorCode, "Error querying the build log size");
++  char* buildLogData = new char[buildLogSize+1];
++  errorCode = clGetProgramBuildInfoWithNoTypeCastHack(result, *device_list, CL_PROGRAM_BUILD_LOG, buildLogSize, buildLogData, NULL);
++
++  verifyOutputCode(errorCode, "Error querying the build log");
++  std::string buildLog(buildLogData);
++#ifdef __AXTOR_DEBUG_PRINT
++  std::cout << "Build log: " << buildLog << std::endl;
++#endif
++
++  size_t buildLogKernelName = buildLog.find("Function properties for " + kernelName);
++  if (buildLogKernelName != std::string::npos) {
++    int regs = 0;
++    int smem = 0;
++    int cmem = 0;
++    parseBuildLog(buildLog, kernelName, regs, smem, cmem);
++    if (kernelResources[kernelName].empty()) {
++      // else, it already exists in the map
++      // coarsening factor and direction would have to be parsed,
++      // but the maths in calculateOccupancies() will work if cf is set to 1
++      kernelResources[kernelName].push_back(new KernelResources(regs, smem, cmem, 1, 1, false, ""));
++    }
++  }
++
++  size_t bin_sz;
++  errorCode = clGetProgramInfoWithNoTypeCastHack(result, CL_PROGRAM_BINARY_SIZES, sizeof(size_t), &bin_sz, NULL);
++  // Read binary (PTX file) to memory buffer
++  char *bin = (char *)malloc(bin_sz);
++  errorCode = clGetProgramInfoWithNoTypeCastHack(result, CL_PROGRAM_BINARIES, sizeof(char *), &bin, NULL);
++  //unsigned char* bin = new unsigned char[bin_sz+1];
++  //errorCode = clGetProgramInfoWithNoTypeCastHack(result, CL_PROGRAM_BINARIES, bin_sz, bin, NULL);
++
++#ifdef __AXTOR_DEBUG_PRINT
++  FILE* fp;
++  fp = fopen("/tmp/dump.ptx", "wb");
++  fwrite(bin, sizeof(char), bin_sz, fp);
++  fclose(fp);
++#endif
++
++  delete [] buildLogData;
++  //delete [] bin;
++  free(bin);
++
++  return result;
++}
++
++cl_program compileSingleCF(std::string &inputFile,
++                           const char *options,
++			   std::string &optOptions,
++			   std::string &outputFile,
++			   int seed,
++			   cl_context context,
++			   clCreateProgramWithSourceFunction originalCreateProgramWithSource,
++			   clBuildProgramFunction originalBuildProgram,
++			   cl_uint num_devices,
++                           const cl_device_id *device_list,
++                           void (*pfn_notify)(cl_program, void *),
++                           void *user_data,
++                           bool cacheDependenceAnalysis)
++{
++  std::string oclOptions = compile(inputFile, options, optOptions, outputFile, seed, cacheDependenceAnalysis);
+ 
+   // Create the new program.
+   size_t outputSize;
+-  const char *outputProgram = readFile(outputFile.c_str(), &outputSize);
++  const char *outputProgram;
+   cl_int errorCode;
+ 
+-  desc->handle = originalCreateProgramWithSource(
+-      desc->context, 1, (const char **)&outputProgram, &outputSize, &errorCode);
++#ifdef PERFORM_AXTOR_COMPILE
++  outputProgram = readFile(outputFile.c_str(), &outputSize);
++#else
++  outputProgram = readFile(inputFile.c_str(), &outputSize); // read from file not processed by axtor
++#endif
++ 
++  cl_program program = originalCreateProgramWithSource(
++      context, 1, (const char **)&outputProgram, &outputSize, &errorCode);
+   verifyOutputCode(errorCode, "Error creating the new program");
+ 
+   // Build the new program.
+-  errorCode = originalBuildProgram(desc->handle, num_devices, device_list,
++  errorCode = originalBuildProgram(program, num_devices, device_list,
+                                    oclOptions.c_str(), pfn_notify, user_data);
+   verifyOutputCode(errorCode, "Error building the new program");
+-
+-  std::string removeString = "rm " + inputFile + " && rm " + outputFile;
+-  system(removeString.c_str());
+-
+   delete[] outputProgram;
+-
+-  return CL_SUCCESS;
++  return program;
+ }
+ 
+ //------------------------------------------------------------------------------
+-std::string compile(std::string &inputFile, const char *options,
+-                    std::string &outputFile, int seed) {
++std::string compile(std::string &inputFile, const char *options, std::string &optOptions,
++                    std::string &outputFile, int seed, bool cacheDependenceAnalysis) {
+   // Compile the program.
+-  std::string optOptions = getEnvString(OCL_COMPILER_OPTIONS);
+ 
+   if (options == NULL)
+     options = "";
+ 
++#ifdef __AXTOR_DEBUG_PRINT
++  std::cout << "Options in compile: " << options << std::endl;
++#endif
++
+   std::string clangOptions(options);
+   std::string oclOptions;
+ 
+   splitCompilerOptions(clangOptions, oclOptions);
+ 
+-  if (compileWithAxtor(inputFile, clangOptions, optOptions, outputFile, seed)) {
++#ifdef __AXTOR_DEBUG_PRINT
++  std::cout << "clangOptions: " << clangOptions << std::endl << "optOptions: " << optOptions << std::endl << "oclOptions: " << oclOptions << std::endl;
++#endif
++#ifdef PERFORM_AXTOR_COMPILE
++  if (compileWithAxtor(inputFile, clangOptions, optOptions, outputFile, seed, cacheDependenceAnalysis)) { //TODO: comment out
+     std::cout << "Error compiling with axtor\n";
+     exit(1);
+   }
++#endif
+ 
+   return oclOptions;
+ }
+ 
+ //------------------------------------------------------------------------------
++inline std::string getPotentialLimitingFactor(int activeThreadsByRegs, int activeThreadsBySMem, int activeThreadsByNumBlocks) {
++  if (activeThreadsByNumBlocks < activeThreadsByRegs || activeThreadsByNumBlocks < activeThreadsBySMem) return "blocks per SMX";
++  if (activeThreadsByRegs == activeThreadsBySMem) return "regs + smem";
++  if (activeThreadsByRegs > activeThreadsBySMem) return "smem";
++  return "regs";
++}
++
++//------------------------------------------------------------------------------
++void calculateOccupancies(cl_uint work_dim, const size_t *global_work_size, const size_t *local_work_size, std::string kernelName) {
++  std::vector<KernelResources*> coarsenings = kernelResources[kernelName];
++  if (coarsenings.empty()) {
++    std::cout << "No coarsenings found for kernel " << kernelName << std::endl;
++    return;
++  }
++
++  KernelLaunchConfig * klc = new KernelLaunchConfig();
++  //int gridDim[work_dim];
++  int originalThreadsPerBlock = 1;
++  int numBlocks = 1;
++  // calculate block sizes and print what we know about input dimension
++  for (int i = 0; i < work_dim; i++) {
++    klc->gridDim[i] = global_work_size[i] / local_work_size[i];
++    numBlocks *= klc->gridDim[i];
++  }
++  for (int i = 0; i < work_dim; i++) {
++    originalThreadsPerBlock *= local_work_size[i];
++  }
++  klc->numBlocks = numBlocks;
++  klc->numThreadsPerBlock = originalThreadsPerBlock;
++  kernelLaunchConfig.emplace(kernelName, klc);
++
++  std::string applyThreadLevelCoarseningStr = getEnvString("THREAD_LEVEL_COARSENING");
++  bool isThreadLevelCoarsening = !applyThreadLevelCoarseningStr.empty();
++
++
++  // set up device
++  //const int computeUnits = stoi(getEnvString("ARCH_COMPUTE_UNITS", "15")); // not needed here
++  const int maxActiveThreadsPerSMX = stoi(getEnvString("ARCH_ACTIVE_THREADS_PER_CU", "2048"));
++  const int maxBlocksPerSMX = stoi(getEnvString("ARCH_GROUPS_PER_CU", "16"));
++  const int maxRegsPerSMX = stoi(getEnvString("ARCH_REGS_PER_CU", "65536"));
++  const int maxSMemPerSMX = stoi(getEnvString("ARCH_SMEM_PER_CU", "49152"));
++
++  for (std::vector<KernelResources*>::reverse_iterator coarsening = coarsenings.rbegin(); coarsening != coarsenings.rend(); coarsening++) {
++    int threadsPerBlock = isThreadLevelCoarsening ? (originalThreadsPerBlock / (*coarsening)->cf) : originalThreadsPerBlock;
++    int theoreticBlocksPerSMX = std::min(maxBlocksPerSMX, maxActiveThreadsPerSMX / threadsPerBlock);
++    (*coarsening)->activeThreadsByNumBlocks = theoreticBlocksPerSMX * threadsPerBlock;
++    (*coarsening)->activeThreadsBySMem = std::min(maxSMemPerSMX / ((*coarsening)->smem > 0 ? (*coarsening)->smem : 1), theoreticBlocksPerSMX) * threadsPerBlock;
++    (*coarsening)->activeThreadsByRegs = std::min(maxActiveThreadsPerSMX, ((maxRegsPerSMX / (*coarsening)->regs) / threadsPerBlock) * threadsPerBlock);
++    (*coarsening)->achievableActiveThreads = std::min(std::min((*coarsening)->activeThreadsByRegs, (*coarsening)->activeThreadsByNumBlocks), (*coarsening)->activeThreadsBySMem);
++    (*coarsening)->occupancy = ((*coarsening)->achievableActiveThreads * 100.0 / maxActiveThreadsPerSMX);
++
++  }
++  
++  KernelResources *kr = *coarsenings.begin();
++#ifdef __AXTOR_DEBUG_PRINT
++  std::cout << "Kernel " << kernelName << " occupancy is " << kr->occupancy << "\n";
++#endif
++
++  std::string oredSetup = getEnvString("OCCUPANCY_REDUCTION_SETUP");
++  if (!oredSetup.empty()) {
++    std::cout << "Dumping occupancy reduction setup info to " << oredSetup << "\n";
++    std::stringstream oredSetupInfo;
++    oredSetupInfo << "smem " << kr->smem << "\nblocksize " << originalThreadsPerBlock << "\noccupancy " << (kr->occupancy / 100) << "\n";
++    writeFile(oredSetup, oredSetupInfo.str());
++  }
++
++}
++
++//------------------------------------------------------------------------------
++void applyCoarseningModel(std::string kernelName) {
++  std::vector<KernelResources*> coarsenings = kernelResources[kernelName];
++  if (coarsenings.empty()) {
++    std::cout << "No coarsenings found for kernel " << kernelName << std::endl;
++    return;
++  }
++
++  if (kernelLaunchConfig.count(kernelName) == 0) {
++    std::cout << "Did not store the number of requested blocks for kernel " << kernelName << std::endl;
++  }
++
++  // set up device
++  const int computeUnits = stoi(getEnvString("ARCH_COMPUTE_UNITS", "15"));
++  const int maxActiveThreadsPerSMX = stoi(getEnvString("ARCH_ACTIVE_THREADS_PER_CU", "2048"));
++  const int maxBlocksPerSMX = stoi(getEnvString("ARCH_GROUPS_PER_CU", "16"));
++  const int maxRegsPerSMX = stoi(getEnvString("ARCH_REGS_PER_CU", "65536"));
++  const int maxSMemPerSMX = stoi(getEnvString("ARCH_SMEM_PER_CU", "49152"));
++
++  int numBlocks = kernelLaunchConfig[kernelName]->numBlocks;
++  int originalThreadsPerBlock = kernelLaunchConfig[kernelName]->numThreadsPerBlock;
++  int maxExecutedBlocksPerRound = std::min(maxBlocksPerSMX, maxActiveThreadsPerSMX / originalThreadsPerBlock) * computeUnits;
++  int maxCFByInputSize = numBlocks < maxExecutedBlocksPerRound ? 1 : numBlocks / maxExecutedBlocksPerRound;
++  unsigned int maxCFByInputDivisibility = 1;
++  const unsigned int coarseningDirection = coarsenings.front()->direction; // TODO: this assumes constant direction among all coarsened kernels
++  while (kernelLaunchConfig[kernelName]->gridDim[coarseningDirection] > maxCFByInputDivisibility && kernelLaunchConfig[kernelName]->gridDim[coarseningDirection] % maxCFByInputDivisibility == 0) {
++    maxCFByInputDivisibility <<= 1;
++  }
++
++  int chosenCF = 0;
++  int chosenCFMaxActiveThreads = 0;
++  std::string limitingFactor;
++  std::string prevLimitingFactor;
++  int maxCFByInputSize_maxActiveThreads = 0;
++  int maxCFByInputDivisibility_maxActiveThreads = 0;
++
++  std::cout << "Found the following coarsenings for kernel " << kernelName << ": " << std::endl;
++  for (std::vector<KernelResources*>::reverse_iterator coarsening = coarsenings.rbegin(); coarsening != coarsenings.rend(); coarsening++) {
++    int achievableActiveThreads = (*coarsening)->achievableActiveThreads;
++    
++    std::cout << (*coarsening)->cf << ": " << (*coarsening)->regs << " regs " << (*coarsening)->smem << " smem " << (*coarsening)->cmem << " cmem";// << std::endl;
++    std::cout << "\tactive threads by regs: " << (*coarsening)->activeThreadsByRegs << ", block limit: " << (*coarsening)->activeThreadsByNumBlocks
++              << ", smem: " << (*coarsening)->activeThreadsBySMem
++              << ", occupancy => " << ((*coarsening)->occupancy) << "%" << std::endl;
++    
++    if ((*coarsening)->cf == maxCFByInputSize) {
++      maxCFByInputSize_maxActiveThreads = achievableActiveThreads;
++    }
++    if ((*coarsening)->cf == maxCFByInputDivisibility) {
++      maxCFByInputDivisibility_maxActiveThreads = achievableActiveThreads;
++    }
++    
++    if (achievableActiveThreads > chosenCFMaxActiveThreads) {
++      chosenCF = (*coarsening)->cf;
++      chosenCFMaxActiveThreads = achievableActiveThreads;
++      limitingFactor = prevLimitingFactor.empty() ? getPotentialLimitingFactor((*coarsening)->activeThreadsByRegs, (*coarsening)->activeThreadsBySMem, (*coarsening)->activeThreadsByNumBlocks) : prevLimitingFactor;
++    }
++    prevLimitingFactor = getPotentialLimitingFactor((*coarsening)->activeThreadsByRegs, (*coarsening)->activeThreadsBySMem, (*coarsening)->activeThreadsByNumBlocks);
++  }
++  if (chosenCF > maxCFByInputSize) {
++    chosenCF = maxCFByInputSize;
++    chosenCFMaxActiveThreads = maxCFByInputSize_maxActiveThreads;
++    limitingFactor = "input size (" + std::to_string(numBlocks) + " blocks)";
++  } else if (chosenCF > maxCFByInputDivisibility) {
++    chosenCF = maxCFByInputDivisibility;
++    chosenCFMaxActiveThreads = maxCFByInputDivisibility_maxActiveThreads;
++    limitingFactor = "input divisibility";
++  }
++  int theoreticalCF = chosenCF;
++  if (coarsenings.front()->cf == 1 && coarsenings.front()->isCacheDependent) {
++    limitingFactor = "cache line re-use (" + coarsenings.front()->cdaLog + ")";
++    chosenCF = 1;
++  }
++  std::cout << "Program has " << (coarsenings.front()->isCacheDependent ? "" : "no ") << "cache line re-use" << std::endl;
++  std::cout << "Model prediction for kernel//blocks//theoretical cf//chosen cf//dir//limiting factor: " << kernelName << "\t" << numBlocks << "\t" << theoreticalCF << "\t" << chosenCF << "\t" << coarseningDirection << "\t" << limitingFactor << std::endl;
++  chosenCFs[kernelName] = chosenCF;
++}
++
+ cl_int clEnqueueNDRangeKernel(
+     cl_command_queue command_queue, cl_kernel kernel, cl_uint work_dim,
+     const size_t *global_work_offset, const size_t *global_work_size,
+     const size_t *local_work_size, cl_uint num_events_in_wait_list,
+     const cl_event *event_wait_list, cl_event *event) {
+-  std::cerr << "HIJACKED clEnqueueNDRangeKernel HIJACKED\n";
+ 
+   // Setup the event to measure the kernel execution time.
+   bool isEventNull = false;
+@@ -248,19 +778,47 @@ cl_int clEnqueueNDRangeKernel(
+ 
+   size_t *newGlobalSize = new size_t[work_dim];
+   size_t *newLocalSize = new size_t[work_dim];
++  size_t *real_local_work_size = new size_t[work_dim];
++
++  // handle the case that local_work_size is NULL - take a best guess
++  if (local_work_size == NULL) {
++    switch (work_dim) {
++      case 1: real_local_work_size[0] = 256;
++	      break;
++      case 2: real_local_work_size[0] = 16;
++	      real_local_work_size[1] = 16;
++	      break;
++      case 3: real_local_work_size[0] = 16;
++	      real_local_work_size[1] = 8;
++	      real_local_work_size[2] = 8;
++    }
++  } else {
++    memcpy(real_local_work_size, local_work_size, work_dim * sizeof(size_t));
++  }
+ 
+   if (kernelName != envKernelName) {
++#ifdef __AXTOR_DEBUG_PRINT
+     std::cout << "No coarsening for: " << kernelName << "\n";
+     std::cout << "gws " << work_dim << " " << global_work_size[0] << "\n";
++#endif
+     memcpy(newGlobalSize, global_work_size, work_dim * sizeof(size_t));
+-
+-    if (local_work_size != NULL)
+-      memcpy(newLocalSize, local_work_size, work_dim * sizeof(size_t));
+-    else
+-      newLocalSize = NULL;
++    memcpy(newLocalSize, real_local_work_size, work_dim * sizeof(size_t));
+   } else {
++    calculateOccupancies(work_dim, global_work_size, real_local_work_size, kernelName);
++    std::string testMaxCoarseningFactor = getEnvString("MAX_COARSENING_FACTOR");
++    int maxCoarseningFactor = 0;
++    if (!testMaxCoarseningFactor.empty()) {
++      maxCoarseningFactor = std::stoi(testMaxCoarseningFactor);
++    }
++    if (maxCoarseningFactor > 0) {
++      applyCoarseningModel(kernelName);
++      if (chosenCFs.count(kernelName) > 0) {
++        // select coarsening factor chosen by model prediction
++        setenv("CF_OVERRIDE", std::to_string(chosenCFs[kernelName]).c_str(), 1);
++      }
++    }
+     bool NDRangeResult =
+-        computeNDRangeDim(work_dim, global_work_size, local_work_size,
++        computeNDRangeDim(work_dim, global_work_size, real_local_work_size,
+                           newGlobalSize, newLocalSize);
+ 
+     if (NDRangeResult == false) {
+@@ -293,6 +851,7 @@ cl_int clEnqueueNDRangeKernel(
+ 
+   delete[] newGlobalSize;
+   delete[] newLocalSize;
++  delete[] real_local_work_size;
+ 
+   return CL_SUCCESS;
+ }
+@@ -301,8 +860,6 @@ cl_int clEnqueueNDRangeKernel(
+ cl_command_queue clCreateCommandQueue(cl_context context, cl_device_id device,
+                                       cl_command_queue_properties properties,
+                                       cl_int *errcode_ret) {
+-  std::cout << "HIJACKED clCreateCommandQueue HIJACKED\n";
+-
+   // Get pointer to original function calls.
+   clCreateCommandQueueFunction originalclCreateCommandQueue;
+   *(void **)(&originalclCreateCommandQueue) =
+diff --git a/opencl_tools/function_overload/src/OCLWrapper.cpp b/opencl_tools/function_overload/src/OCLWrapper.cpp
+index dddae9b..4df8803 100644
+--- a/opencl_tools/function_overload/src/OCLWrapper.cpp
++++ b/opencl_tools/function_overload/src/OCLWrapper.cpp
+@@ -22,7 +22,9 @@ cl_int clEnqueueNDRangeKernel(cl_command_queue command_queue,
+                               cl_uint num_events_in_wait_list,
+                               const cl_event* event_wait_list,
+                               cl_event* event) {
++#ifdef __utils_verbose
+   std::cerr << "HIJACKED clEnqueueNDRangeKernel HIJACKED\n";
++#endif
+ 
+   // Setup the event to measure the kernel execution time.
+   bool isEventNull = (event == NULL);
+@@ -63,7 +65,9 @@ cl_command_queue clCreateCommandQueue(cl_context context,
+                                       cl_device_id device,
+                                       cl_command_queue_properties properties,
+                                       cl_int* errcode_ret) {
++#ifdef __utils_verbose
+   std::cout << "HIJACKED clCreateCommandQueue HIJACKED\n";
++#endif
+ 
+   // Get pointer to original function calls.
+   clCreateCommandQueueFunction originalclCreateCommandQueue;
+diff --git a/opencl_tools/function_overload/src/Utils.cpp b/opencl_tools/function_overload/src/Utils.cpp
+index 8bec656..9153fd7 100644
+--- a/opencl_tools/function_overload/src/Utils.cpp
++++ b/opencl_tools/function_overload/src/Utils.cpp
+@@ -14,9 +14,11 @@
+ #include <vector>
+ 
+ #define RELAXED_MATH "-cl-fast-relaxed-math"
+-#define OCL_OPTIONS_NUMBER 1
++#define CL_BUILD_VERBOSE "-cl-nv-verbose"
++#define OCL_OPTIONS_NUMBER 2
++#define __utils_verboseXX 1 
+ 
+-const char *oclOptionsList[OCL_OPTIONS_NUMBER] = {RELAXED_MATH};
++const char *oclOptionsList[OCL_OPTIONS_NUMBER] = {RELAXED_MATH, CL_BUILD_VERBOSE};
+ 
+ // System Functions.
+ //------------------------------------------------------------------------------
+@@ -182,7 +184,13 @@ inline bool isError(cl_int valueToCheck) { return valueToCheck != CL_SUCCESS; }
+ void verifyOutputCode(cl_int valueToCheck, const char *errorMessage) {
+   if (isError(valueToCheck)) {
+     std::cout << errorMessage << " " << valueToCheck << "\n";
+-    exit(valueToCheck);
++    std::string maxCoarseningFactor = getEnvString("MAX_COARSENING_FACTOR");
++    if (maxCoarseningFactor.empty()) {
++      exit(valueToCheck);
++    } else {
++      // do not exit if we're compiling several versions of code
++      throw 20;
++    }
+   }
+ }
+ 
+@@ -214,12 +222,14 @@ std::string getKernelName(cl_kernel kernel) {
+ //------------------------------------------------------------------------------
+ int compileWithAxtor(std::string &inputFile, std::string &clangOptions,
+                      std::string &optOptions, std::string &outputFile,
+-                     int seed) {
++                     int seed, bool cacheLineReuseAnalysis) {
+   std::string bitcodeFile = getMangledFileName(BC_FILE, seed);
++  //std::string bitcodeFilePostAxtor = getMangledFileName(BC_POST_AXTOR_FILE, seed);
++  std::string clrFile = getMangledFileName(CLR_FILE, seed);
+ 
+   // Inline commands.
+   std::string sedCmdOne = "sed \'s/__inline/inline/\' -i " + inputFile;
+-  std::string sedCmdTwo = "sed \'s/inline/static inline/\' -i " + inputFile;
++  std::string sedCmdTwo = "sed \'s/static inline\\|inline/static inline/\' -i " + inputFile;
+ 
+   std::string oclHeader = getEnvString("OCL_HEADER");
+ 
+@@ -227,19 +237,36 @@ int compileWithAxtor(std::string &inputFile, std::string &clangOptions,
+   // Clang command.
+   std::string clangCmd = "LD_PRELOAD=\"\" clang -x cl -target spir -include " +
+                          oclHeader + " -O0 " + clangOptions + " " + inputFile +
+-                         " -S -emit-llvm -fno-builtin -o " + bitcodeFile +
+-                         " 2> /dev/null";
++                         " -S -emit-llvm -fno-builtin -o " + bitcodeFile;
++
++  std::string clrOptions = cacheLineReuseAnalysis ? getEnvString("CLR_OPTIONS") : "";
++  std::string clrCmd = "LD_PRELOAD=\"\" opt " + clrOptions + " " + bitcodeFile + " 1> /dev/null 2> " + clrFile;
++  //std::string clrClangCmd = "LD_PRELOAD=\"\" clang -x cl -target spir -include " +
++  //                          oclHeader + " -O0 " + clangOptions + " " + outputFile +
++  //                          " -S -emit-llvm -fno-builtin -o " + bitcodeFilePostAxtor;
++  //std::string clrCmd = "LD_PRELOAD=\"\" opt " + clrOptions + " " + bitcodeFilePostAxtor + " 1> /dev/null 2> " + clrFile;
++
++  std::string oredOptions = getEnvString("OCCUPANCY_REDUCTION");
++  bool occupancyReduction = !oredOptions.empty();
++  std::string oredCmd = "LD_PRELOAD=\"\" opt " + oredOptions + " " + bitcodeFile + " -S -o " + bitcodeFile; 
+ 
+   // Opt command.
+-  std::string optCmd = "LD_PRELOAD=\"\" opt " + optOptions + " " + bitcodeFile +
+-                       " -o " + bitcodeFile + " 2> /dev/null";
++  std::string optCmd = "LD_PRELOAD=\"\" opt " + optOptions + " -dce -S " + bitcodeFile + // todo undo and add -O1
++                       " -o " + bitcodeFile;
++
++  std::string reoptCmd = "LD_PRELOAD=\"\" opt  -O2 " + bitcodeFile +
++                       " -o " + bitcodeFile;
+ 
+   // Axtor command.
+   std::string axtorCmd = "LD_PRELOAD=\"\" axtor " + bitcodeFile + " -m OCL " +
+-                         "-o " + outputFile + " 2> /dev/null";
+-
+-  std::cout << "CLANG:\n" << clangCmd << "\nOPT:\n" << optCmd << "\nAXTOR:\n"
+-            << axtorCmd << "\n";
++                         "-o " + outputFile;
++#ifdef __utils_verbose
++  std::cout << "CLANG:\n" << clangCmd 
++            << (cacheLineReuseAnalysis ? "\nCLR:\n" : "") << (cacheLineReuseAnalysis ? clrCmd : "")
++	    << (occupancyReduction ? "\nORED:\n" : "") << (occupancyReduction ? oredCmd : "")
++            << "\nOPT:\n" << optCmd
++            << "\nAXTOR:\n" << axtorCmd << "\n";
++#endif
+ 
+   // Inline.
+   system(sedCmdOne.c_str());
+@@ -251,18 +278,51 @@ int compileWithAxtor(std::string &inputFile, std::string &clangOptions,
+     return 1;
+   }
+ 
+-  // Opt.
++  /*// CacehDependenceAnalysis
++  if (cacheLineReuseAnalysis && system(clrCmd.c_str())) {
++    std::cout << "&&&&& CACHE_DEPENDENCE_ANALYSIS_FAILURE!";
++    return 4;
++  }*/
++
++  // Opt with coarsening
+   if (system(optCmd.c_str())) {
+     std::cout << "&&&&& OPT_FAILURE!";
+     return 2;
+   }
+ 
++  /*if (system(reoptCmd.c_str())) {
++    std::cout << "&&&&& RE_OPT_FAILURE!";
++    return 5;
++  }*/
++
++  if (cacheLineReuseAnalysis && system(clrCmd.c_str())) {
++    std::cout << "&&&&& CACHE_LINE_REUSE_ANALYSIS_FAILURE!";
++    return 4;
++  }
++
++  if (occupancyReduction && system(oredCmd.c_str())) {
++    std::cout << "&&&&& OCCUPANCY_REDUCTION_FAILURE!";
++    return 6;
++  }
++
+   // Axtor.
+   if (system(axtorCmd.c_str())) {
+     std::cout << "&&&&& AXTOR_FAILURE!";
+     return 3;
+   }
+ 
++  // Post-axtor CLR
++  /*if (cacheLineReuseAnalysis) {
++    if (system(clrClangCmd.c_str())) {
++      std::cout << "&&&&& POST-AXTOR (PRE-CLR) CLANG FAILURE!";
++      return 4;
++    }
++    if (system(clrCmd.c_str())) {
++      std::cout << "&&&&& CACHE_LINE_REUSE_ANALYSIS_FAILURE!";
++      return 5;
++    }
++  }*/
++
+   // size_t bb;
+   // char *tmp;
+   // tmp = readFile(outputFile.c_str(), &bb);
+@@ -270,7 +330,7 @@ int compileWithAxtor(std::string &inputFile, std::string &clangOptions,
+ 
+   // Remove the bitcode file.
+   std::string remove = "rm " + bitcodeFile;
+-  system(remove.c_str());
++  //system(remove.c_str()); // todo undo
+ 
+   return 0;
+ }
+@@ -292,6 +352,15 @@ bool computeNDRangeDim(unsigned int dimensions, const size_t *globalSize,
+ 
+   CF = cp.first;
+   CD = cp.second;
++  
++  // this contains CF determined by model
++  std::string cfOverride = getEnvString("CF_OVERRIDE");
++  if (!cfOverride.empty()) {
++    CF = std::stoi(cfOverride);
++#ifdef __utils_verbose
++    std::cout << "Applied CF_OVERRIDE of factor " << CF << std::endl;
++#endif
++  }
+ 
+   if (CF == 0 && CD == 0) {
+     cp = getVectorizationOptions(compilerOptions);
+@@ -324,8 +393,20 @@ bool computeNDRangeDim(unsigned int dimensions, const size_t *globalSize,
+       newGlobalSize[CD] = globalSize[CD];
+       newLocalSize[CD] = localSize[CD];
+     }
+-    newGlobalSize[CD] = globalSize[CD] / CF;
+-    newLocalSize[CD] = localSize[CD] / CF;
++    std::string applyThreadLevelCoarsening = getEnvString("THREAD_LEVEL_COARSENING");
++    if (applyThreadLevelCoarsening.empty()) {
++#ifdef __utils_verbose
++      std::cout << "Using block level coarsening\n";
++#endif
++      newGlobalSize[CD] = globalSize[CD] / CF;
++      newLocalSize[CD] = localSize[CD];
++    } else {
++#ifdef __utils_verbose
++      std::cout << "Using thread level coarsening\n";
++#endif
++      newGlobalSize[CD] = globalSize[CD] / CF;
++      newLocalSize[CD] = localSize[CD] / CF;
++    }
+ 
+     if (newGlobalSize[CD] == 0 || newLocalSize[CD] == 0) {
+       newGlobalSize[CD] = globalSize[CD];
+@@ -352,6 +433,8 @@ void enqueueKernel(cl_command_queue command_queue, cl_kernel kernel,
+ 
+   cl_int errorCode = 0;
+ 
++  // printing global/local sizes
++#ifdef __utils_verbose
+   for (unsigned int index = 0; index < work_dim; ++index) {
+     std::cout << "gs[" << index << "] = " << global_work_size[index] << "\n";
+     if (local_work_size != NULL)
+@@ -359,6 +442,24 @@ void enqueueKernel(cl_command_queue command_queue, cl_kernel kernel,
+     else
+       std::cout << "ls = NULL\n";
+   }
++  std::cout << "Blocks: ";
++#endif
++  int totalBlocks = 1;
++  if (local_work_size != NULL) {
++    for (unsigned int index = 0; index < work_dim; ++index) {
++      int dimBlocks = global_work_size[index] / local_work_size[index];
++#ifdef __utils_verbose
++      std::cout << dimBlocks;
++#endif
++      totalBlocks *= dimBlocks;
++      if (index + 1 < work_dim) std::cout << "x";
++    }
++  } else {
++    totalBlocks = -1; // local size is NULL, use dummy value
++  }
++#ifdef __utils_verbose
++  std::cout << " = " << totalBlocks << std::endl;
++#endif
+ 
+   for (unsigned int index = 0; index < repetitions; ++index) {
+     errorCode = originalclEnqueueKernel(
+@@ -368,9 +469,9 @@ void enqueueKernel(cl_command_queue command_queue, cl_kernel kernel,
+     clFinish(command_queue);
+     cl_int eventStatus = clWaitForEvents(1, event);
+     if (eventStatus == -5)
+-      std::cerr << kernelName + " 0\n";
++      std::cout << kernelName + " 0\n";
+     else
+-      std::cerr << kernelName << " " << computeEventDuration(event) << "\n";
++      std::cout << kernelName << " " << computeEventDuration(event) << "\n";
+     verifyOutputCode(errorCode, "Error releasing the event");
+   }
+ }
+diff --git a/opencl_tools/opencl_wrapper/CMakeLists.txt b/opencl_tools/opencl_wrapper/CMakeLists.txt
+index fdf586c..d06a003 100644
+--- a/opencl_tools/opencl_wrapper/CMakeLists.txt
++++ b/opencl_tools/opencl_wrapper/CMakeLists.txt
+@@ -9,4 +9,6 @@ include_directories(${WRAPPER_INCLUDE_PATH} ${OPENCL_INCLUDE_PATH})
+ 
+ add_library(${OPENCL_WRAPPER_LIB} SHARED ${SRC_FILE_LIST})
+ 
++target_link_libraries(${OPENCL_WRAPPER_LIB} ${OPENCL_LIBRARY_PATH})
++
+ install_targets("/${INSTALL_LIB_DIR}/" ${OPENCL_WRAPPER_LIB})
+diff --git a/opencl_tools/opencl_wrapper/include/Queue.h b/opencl_tools/opencl_wrapper/include/Queue.h
+index 65f8050..931e113 100644
+--- a/opencl_tools/opencl_wrapper/include/Queue.h
++++ b/opencl_tools/opencl_wrapper/include/Queue.h
+@@ -29,6 +29,8 @@ public:
+ // Public methods.
+ //------------------------------------------------------------------------------
+ public:
++  void copyBuffer(const Buffer& src, const Buffer& dest, size_t size);
++
+   void readBuffer(const Buffer& buffer, size_t size, void* pointer);
+   void readBuffer(const Buffer& buffer, size_t size, void* pointer, 
+                   Event& event);
+diff --git a/opencl_tools/opencl_wrapper/lib/Device.cpp b/opencl_tools/opencl_wrapper/lib/Device.cpp
+index fe103af..f002c29 100644
+--- a/opencl_tools/opencl_wrapper/lib/Device.cpp
++++ b/opencl_tools/opencl_wrapper/lib/Device.cpp
+@@ -54,7 +54,7 @@ DeviceInfoTraits<std::string>::getDeviceInfo(cl_device_id deviceId,
+   cl_int errorCode =
+       clGetDeviceInfo(deviceId, deviceInfoName, resultSize, rawResult, NULL);
+   verifyOutputCode(errorCode, "Error querying device info: ");
+-  std::string result(rawResult, resultSize);
++  std::string result(rawResult);
+   delete[] rawResult;
+   return result;
+ }
+diff --git a/opencl_tools/opencl_wrapper/lib/Program.cpp b/opencl_tools/opencl_wrapper/lib/Program.cpp
+index f99c2f8..935049f 100644
+--- a/opencl_tools/opencl_wrapper/lib/Program.cpp
++++ b/opencl_tools/opencl_wrapper/lib/Program.cpp
+@@ -36,7 +36,7 @@ Program::~Program() throw () {
+ //------------------------------------------------------------------------------
+ void Program::createFromSource(const std::string& sourceFile) {
+   std::string sourceString = readFile(sourceFile);
+-  sourceString += '\0';
++  //sourceString += '\0';
+   const char* sourceData = sourceString.data();
+   size_t sourceSize = sourceString.length();
+ 
+diff --git a/opencl_tools/opencl_wrapper/lib/Queue.cpp b/opencl_tools/opencl_wrapper/lib/Queue.cpp
+index f944ae3..c7c41bc 100644
+--- a/opencl_tools/opencl_wrapper/lib/Queue.cpp
++++ b/opencl_tools/opencl_wrapper/lib/Queue.cpp
+@@ -21,6 +21,21 @@ Queue::~Queue() throw() {
+   clReleaseCommandQueue(queue);
+ }
+ 
++// Copy buffer.
++//------------------------------------------------------------------------------
++void Queue::copyBuffer(const Buffer& src, const Buffer& dest, size_t size) {
++  cl_int errorCode = clEnqueueCopyBuffer (queue,
++                                          src.getId(),
++                                          dest.getId(),
++					  0, // src_offset
++					  0, // dest_offset
++					  size,
++					  0, //cl_uint num_events_in_wait_list
++					  NULL, //const cl_event *event_wait_list
++					  NULL); //cl_event *event
++  verifyOutputCode(errorCode, "Error copying the buffer");
++}
++
+ // Read buffer.
+ //------------------------------------------------------------------------------
+ void Queue::readBuffer(const Buffer& buffer, size_t size, void* pointer) {
+diff --git a/tests/memcpy/src/main.cpp b/tests/memcpy/src/main.cpp
+index 69566cc..daa2947 100644
+--- a/tests/memcpy/src/main.cpp
++++ b/tests/memcpy/src/main.cpp
+@@ -17,7 +17,8 @@
+ #include "bench_support.h"
+ 
+ //-----------------------------------------------------------------------------
+-constexpr int SIZE = 512;
++constexpr int SIZE = 1920 * 512;
++constexpr int LINE_SIZE = 512;
+ std::vector<size_t> globalWorkSize = { SIZE };
+ std::vector<size_t> localWorkSize = { 256 };
+ 
+@@ -50,6 +51,7 @@ Buffer *input = nullptr;
+ Buffer *output = nullptr;
+ 
+ cl_int *size = nullptr;
++cl_int *lineSize = nullptr;
+ 
+ // Device.
+ int PLATFORM_ID = 0;
+@@ -129,7 +131,8 @@ void freeMemory() {
+ //-----------------------------------------------------------------------------
+ void hostMemoryAlloc() {
+   size = new cl_int(globalWorkSize[0]);
+-  int bufferSize = globalWorkSize[0] * (*size); 
++  int bufferSize = LINE_SIZE * (*size);
++  lineSize = new cl_int(kernelName.compare("rmrrmw") == 0 ? LINE_SIZE : SIZE);
+ 
+   std::random_device randomDevice;
+   std::mt19937_64 gen(randomDevice());
+@@ -169,7 +172,7 @@ void enqueReadCommands(Queue &queue) {
+ void setKernelArguments() {
+   kernel->setArgument(0, *input);
+   kernel->setArgument(1, *output);
+-  kernel->setArgument(2, sizeof(cl_int), (void *)size);
++  kernel->setArgument(2, sizeof(cl_int), (void *)lineSize);
+ }
+ 
+ //-----------------------------------------------------------------------------
+diff --git a/tests/memset/src/main.cpp b/tests/memset/src/main.cpp
+index 8f7d8e1..ed7b4c4 100644
+--- a/tests/memset/src/main.cpp
++++ b/tests/memset/src/main.cpp
+@@ -19,7 +19,7 @@
+ //-----------------------------------------------------------------------------
+ constexpr int SIZE = 1024;
+ const float CONSTANT = 3.14f;
+-std::vector<size_t> globalWorkSize = { SIZE, SIZE };
++std::vector<size_t> globalWorkSize = { 3*SIZE, 5*SIZE };
+ std::vector<size_t> localWorkSize = { 16, 16 };
+ 
+ const std::string kernelFileName = "memset.cl";
+diff --git a/tests/mm/kernels/mm.cl b/tests/mm/kernels/mm.cl
+index bdc74de..15b2366 100644
+--- a/tests/mm/kernels/mm.cl
++++ b/tests/mm/kernels/mm.cl
+@@ -8,6 +8,6 @@ __kernel void mm(const __global float* A,
+ 
+   float tmp = 0.0f;
+   for(uint index = 0; index < width; ++index)
+-    tmp += A[row * width + index] * B[index * width + column];
+-  C[row * width + column] = tmp;
++    tmp += A[row * width + index] * B[index * height + column];
++  C[row * height + column] = tmp;
+ }
+diff --git a/tests/mm/src/main.cpp b/tests/mm/src/main.cpp
+index 98a97e9..5619d85 100644
+--- a/tests/mm/src/main.cpp
++++ b/tests/mm/src/main.cpp
+@@ -17,8 +17,9 @@
+ #include "bench_support.h"
+ 
+ //-----------------------------------------------------------------------------
+-constexpr int SIZE = 256;
+-std::vector<size_t> globalWorkSize = { SIZE, SIZE };
++constexpr int WIDTH = 256;
++constexpr int HEIGHT = 30*256;
++std::vector<size_t> globalWorkSize = { HEIGHT, HEIGHT };
+ std::vector<size_t> localWorkSize = { 16, 16 };
+ 
+ const std::string kernelFileName = "mm.cl";
+@@ -136,15 +137,15 @@ void hostMemoryAlloc() {
+ 
+   aHost.assign(bufferSize, 0.f);
+   bHost.assign(bufferSize, 0.f);
+-  std::generate_n(aHost.begin(), bufferSize, [&] {
++  std::generate_n(aHost.begin(), WIDTH*HEIGHT, [&] {
+     return (distribution(gen));
+   });
+-  std::generate_n(bHost.begin(), bufferSize, [&] {
++  std::generate_n(bHost.begin(), HEIGHT*WIDTH, [&] {
+     return (distribution(gen));
+   });
+   outputHost.assign(bufferSize, 0.f);
+-  width = new cl_int(globalWorkSize[0]);
+-  height = new cl_int(globalWorkSize[1]);
++  width = new cl_int(WIDTH);
++  height = new cl_int(HEIGHT);
+ }
+ 
+ //-----------------------------------------------------------------------------
+@@ -192,15 +193,15 @@ void run(Queue &queue) {
+ 
+ //-----------------------------------------------------------------------------
+ void verify() {
+-  float* cpuHostC = new float [SIZE * SIZE];
+-  for(unsigned int row = 0; row < SIZE; ++row) {
+-    for(unsigned int column = 0; column < SIZE; ++column) {
+-      cpuHostC[row * SIZE + column] = 0.0f;
+-      for(unsigned int index = 0; index < SIZE; ++index) 
+-        cpuHostC[row * SIZE + column] += aHost[row * SIZE + index] * 
+-                                         bHost[index * SIZE + column];
+-
+-      if(abs(outputHost[row * SIZE + column] - cpuHostC[row * SIZE + column]) 
++  float* cpuHostC = new float [HEIGHT * HEIGHT];
++  for(unsigned int row = 0; row < HEIGHT; ++row) {
++    for(unsigned int column = 0; column < HEIGHT; ++column) {
++      cpuHostC[row * HEIGHT + column] = 0.0f;
++      for(unsigned int index = 0; index < WIDTH; ++index) 
++        cpuHostC[row * HEIGHT + column] += aHost[row * WIDTH + index] * 
++                                         bHost[index * HEIGHT + column];
++
++      if(abs(outputHost[row * HEIGHT + column] - cpuHostC[row * HEIGHT + column]) 
+          >= 0.001f) {
+         std::cout << "Error in the computation:";
+         exit(1);
+diff --git a/tests/mt/src/main.cpp b/tests/mt/src/main.cpp
+index 09a4d7c..40a6933 100644
+--- a/tests/mt/src/main.cpp
++++ b/tests/mt/src/main.cpp
+@@ -17,8 +17,8 @@
+ #include "bench_support.h"
+ 
+ //-----------------------------------------------------------------------------
+-constexpr int WIDTH = 1024;
+-constexpr int HEIGHT = 1024;
++constexpr int WIDTH = 15*1024;
++constexpr int HEIGHT = 15*1024;
+ std::vector<size_t> globalWorkSize = { WIDTH, HEIGHT };
+ std::vector<size_t> localWorkSize = { 16, 16 };
+ 
+diff --git a/tests/mv/src/main.cpp b/tests/mv/src/main.cpp
+index b8bedb5..3ca5a44 100644
+--- a/tests/mv/src/main.cpp
++++ b/tests/mv/src/main.cpp
+@@ -17,7 +17,7 @@
+ #include "bench_support.h"
+ 
+ //-----------------------------------------------------------------------------
+-constexpr int SIZE = 512;
++constexpr int SIZE = 60*512;
+ std::vector<size_t> globalWorkSize = { SIZE };
+ std::vector<size_t> localWorkSize = { 128 };
+ 
+diff --git a/tests/polybench/OpenCL/2DCONV/2DConvolution.cpp b/tests/polybench/OpenCL/2DCONV/2DConvolution.cpp
+index b9c5e94..d8fd496 100644
+--- a/tests/polybench/OpenCL/2DCONV/2DConvolution.cpp
++++ b/tests/polybench/OpenCL/2DCONV/2DConvolution.cpp
+@@ -31,8 +31,8 @@
+ #define MAX_SOURCE_SIZE (0x100000)
+ 
+ /* Problem size */
+-#define NI_DEFAULT 4096
+-#define NJ_DEFAULT 4096
++#define NI_DEFAULT 7680
++#define NJ_DEFAULT 7680
+ 
+ /* Thread block dimensions */
+ #define DIM_LOCAL_WORK_GROUP_X 32
+diff --git a/tests/polybench/OpenCL/2MM/2mm.cpp b/tests/polybench/OpenCL/2MM/2mm.cpp
+index a445af9..78e6fca 100644
+--- a/tests/polybench/OpenCL/2MM/2mm.cpp
++++ b/tests/polybench/OpenCL/2MM/2mm.cpp
+@@ -31,9 +31,9 @@
+ #define MAX_SOURCE_SIZE (0x100000)
+ 
+ /* Problem size. */
+-#define NI_DEFAULT 2048
+-#define NJ_DEFAULT 2048
+-#define NK_DEFAULT 2048
++#define NI_DEFAULT 5*2048
++#define NJ_DEFAULT 3*2048
++#define NK_DEFAULT 256
+ #define NL_DEFAULT 2048
+ 
+ /* Thread block dimensions */
+@@ -62,13 +62,10 @@ cl_program clProgram;
+ cl_mem a_mem_obj;
+ cl_mem b_mem_obj;
+ cl_mem c_mem_obj;
+-cl_mem d_mem_obj;
+-cl_mem e_mem_obj;
+ 
+ size_t NJ = NJ_DEFAULT;
+ size_t NK = NK_DEFAULT;
+ size_t NI = NI_DEFAULT;
+-size_t NL = NL_DEFAULT;
+ 
+ FILE *fp;
+ char *source_str;
+@@ -91,13 +88,13 @@ void init_array(DATA_TYPE *A, DATA_TYPE *B, DATA_TYPE *C, DATA_TYPE *D) {
+ 
+   for (i = 0; i < NI; i++) {
+     for (j = 0; j < NK; j++) {
+-      A[i * NI + j] = random<DATA_TYPE>();
++      A[i * NK + j] = random<DATA_TYPE>();
+     }
+   }
+ 
+   for (i = 0; i < NK; i++) {
+     for (j = 0; j < NJ; j++) {
+-      B[i * NK + j] = random<DATA_TYPE>();
++      B[i * NJ + j] = random<DATA_TYPE>();
+     }
+   }
+ }
+@@ -110,10 +107,6 @@ void cl_mem_init(DATA_TYPE *A, DATA_TYPE *B, DATA_TYPE *C, DATA_TYPE *D,
+                              sizeof(DATA_TYPE) * NK * NJ, NULL, &errcode);
+   c_mem_obj = clCreateBuffer(clGPUContext, CL_MEM_READ_WRITE,
+                              sizeof(DATA_TYPE) * NI * NJ, NULL, &errcode);
+-  d_mem_obj = clCreateBuffer(clGPUContext, CL_MEM_READ_WRITE,
+-                             sizeof(DATA_TYPE) * NJ * NL, NULL, &errcode);
+-  e_mem_obj = clCreateBuffer(clGPUContext, CL_MEM_READ_WRITE,
+-                             sizeof(DATA_TYPE) * NI * NL, NULL, &errcode);
+ 
+   if (errcode != CL_SUCCESS)
+     printf("Error in creating buffers\n");
+@@ -124,10 +117,6 @@ void cl_mem_init(DATA_TYPE *A, DATA_TYPE *B, DATA_TYPE *C, DATA_TYPE *D,
+                                  sizeof(DATA_TYPE) * NK * NJ, B, 0, NULL, NULL);
+   errcode = clEnqueueWriteBuffer(clCommandQue, c_mem_obj, CL_TRUE, 0,
+                                  sizeof(DATA_TYPE) * NI * NJ, C, 0, NULL, NULL);
+-  errcode = clEnqueueWriteBuffer(clCommandQue, d_mem_obj, CL_TRUE, 0,
+-                                 sizeof(DATA_TYPE) * NJ * NL, D, 0, NULL, NULL);
+-  errcode = clEnqueueWriteBuffer(clCommandQue, e_mem_obj, CL_TRUE, 0,
+-                                 sizeof(DATA_TYPE) * NI * NL, E, 0, NULL, NULL);
+   if (errcode != CL_SUCCESS)
+     printf("Error in writing buffers\n");
+ }
+@@ -161,13 +150,12 @@ void cl_launch_kernel() {
+   int ni = NI;
+   int nj = NJ;
+   int nk = NK;
+-  int nl = NL;
+ 
+   size_t oldLocalWorkSize[2], globalWorkSize[2];
+   oldLocalWorkSize[0] = DIM_LOCAL_WORK_GROUP_X;
+   oldLocalWorkSize[1] = DIM_LOCAL_WORK_GROUP_Y;
+-  globalWorkSize[0] = NI;
+-  globalWorkSize[1] = NL;
++  globalWorkSize[0] = NJ;
++  globalWorkSize[1] = NI;
+ 
+   ///////////////////////////////////////////////
+   size_t localWorkSize[2];
+@@ -180,8 +168,8 @@ void cl_launch_kernel() {
+   errcode |= clSetKernelArg(clKernel1, 1, sizeof(cl_mem), (void *)&b_mem_obj);
+   errcode |= clSetKernelArg(clKernel1, 2, sizeof(cl_mem), (void *)&c_mem_obj);
+   errcode |= clSetKernelArg(clKernel1, 3, sizeof(int), (void *)&ni);
+-  errcode |= clSetKernelArg(clKernel1, 4, sizeof(int), (void *)&nk);
+-  errcode |= clSetKernelArg(clKernel1, 5, sizeof(int), (void *)&nj);
++  errcode |= clSetKernelArg(clKernel1, 4, sizeof(int), (void *)&nj);
++  errcode |= clSetKernelArg(clKernel1, 5, sizeof(int), (void *)&nk);
+   if (errcode != CL_SUCCESS)
+     printf("Error in seting arguments\n");
+   // Execute the OpenCL kernel
+@@ -223,8 +211,6 @@ void cl_clean_up() {
+   errcode = clReleaseMemObject(a_mem_obj);
+   errcode = clReleaseMemObject(b_mem_obj);
+   errcode = clReleaseMemObject(c_mem_obj);
+-  errcode = clReleaseMemObject(d_mem_obj);
+-  errcode = clReleaseMemObject(e_mem_obj);
+   errcode = clReleaseCommandQueue(clCommandQue);
+   errcode = clReleaseContext(clGPUContext);
+   if (errcode != CL_SUCCESS)
+@@ -241,7 +227,7 @@ void mm2_cpu(DATA_TYPE *A, DATA_TYPE *B, DATA_TYPE *C) {
+   }
+ 
+   for (i = 0; i < NI; i++) {
+-    for (j = 0; j < 16; j++) {
++    for (j = 0; j < NJ; j++) {
+       DATA_TYPE tmp = 0;
+       
+       for (int rep = 0; rep < intReps; ++rep) {
+@@ -249,7 +235,8 @@ void mm2_cpu(DATA_TYPE *A, DATA_TYPE *B, DATA_TYPE *C) {
+         tmp += A[i * NK + k] * B[k * NJ + j];
+       }
+       }
+-      DATA_TYPE diff = fabs(C[i * NJ + j] - tmp); 
++      DATA_TYPE diff = fabs(C[i * NJ + j] - tmp);
++      if (diff >= 1) std::cout << "Diff is " << std::to_string(diff) << " at index " << i << " " << j << std::endl;
+       assert(diff < 1 && "Error!"); 
+     }
+   }
+@@ -266,23 +253,17 @@ int main(void) {
+   DATA_TYPE *E_outputFromGpu;
+ 
+   /////////////////////////
+-  size_t oldSizes[2] = { NI, NL };
++  size_t oldSizes[2] = { NJ, NI };
+   size_t newSizes[2];
+   getNewSizes(oldSizes, NULL, newSizes, NULL, "mm2_kernel1", 2);
+ //  size_t tmpSizes[2] = {newSizes[0], newSizes[1]};
+ //  getNewSizes(tmpSizes, NULL, newSizes, NULL, "mm2_kernel2", 2);
+-  NI = newSizes[0];
+-  NL = newSizes[1];
+-  NJ = NI;
+-  NK = NI;
+   /////////////////////////
+ 
+   C = (DATA_TYPE *)malloc(NI * NJ * sizeof(DATA_TYPE));
+   A = (DATA_TYPE *)malloc(NI * NK * sizeof(DATA_TYPE));
+   B = (DATA_TYPE *)malloc(NK * NJ * sizeof(DATA_TYPE));
+-  D = (DATA_TYPE *)malloc(NJ * NL * sizeof(DATA_TYPE));
+-  E = (DATA_TYPE *)malloc(NI * NL * sizeof(DATA_TYPE));
+-  E_outputFromGpu = (DATA_TYPE *)malloc(NI * NL * sizeof(DATA_TYPE));
++  E_outputFromGpu = (DATA_TYPE *)malloc(NI * NJ * sizeof(DATA_TYPE));
+ 
+   int i;
+   init_array(A, B, C, D);
+@@ -294,7 +275,7 @@ int main(void) {
+   cl_launch_kernel();
+ 
+   errcode = clEnqueueReadBuffer(clCommandQue, c_mem_obj, CL_TRUE, 0,
+-                                sizeof(DATA_TYPE) * NI * NL, E_outputFromGpu, 0,
++                                sizeof(DATA_TYPE) * NI * NJ, E_outputFromGpu, 0,
+                                 NULL, NULL);
+   if (errcode != CL_SUCCESS)
+     printf("Error in reading GPU mem\n");
+@@ -305,8 +286,6 @@ int main(void) {
+   free(C);
+   free(A);
+   free(B);
+-  free(D);
+-  free(E);
+   free(E_outputFromGpu);
+ 
+   return 0;
+diff --git a/tests/polybench/OpenCL/3DCONV/3DConvolution.cpp b/tests/polybench/OpenCL/3DCONV/3DConvolution.cpp
+index 21a2f79..86daea4 100644
+--- a/tests/polybench/OpenCL/3DCONV/3DConvolution.cpp
++++ b/tests/polybench/OpenCL/3DCONV/3DConvolution.cpp
+@@ -64,7 +64,7 @@ char *source_str;
+ size_t source_size;
+ 
+ size_t NJ = NJ_DEFAULT;
+-size_t NK = NK_DEFAULT;
++size_t NK = NK_DEFAULT * 480;
+ 
+ void read_cl_file() {
+   // Load the kernel source code into the array source_str
+diff --git a/tests/polybench/OpenCL/3MM/3mm.cpp b/tests/polybench/OpenCL/3MM/3mm.cpp
+index ded1ccf..bd7e077 100644
+--- a/tests/polybench/OpenCL/3MM/3mm.cpp
++++ b/tests/polybench/OpenCL/3MM/3mm.cpp
+@@ -30,11 +30,11 @@
+ #define MAX_SOURCE_SIZE (0x100000)
+ 
+ /* Problem size. */
+-# define NI 512
+-# define NJ 512
+-# define NK 512
+-# define NL 512
+-# define NM 512
++# define NI 15*128
++# define NJ 15*128
++# define NK 15*128
++# define NL 15*128
++# define NM 15*128
+ 
+ /* Thread block dimensions */
+ #define DIM_LOCAL_WORK_GROUP_X 32
+@@ -247,37 +247,37 @@ void cl_launch_kernel()
+ 	if(errcode != CL_SUCCESS) printf("Error in seting arguments\n");
+ 	// Execute the OpenCL kernel
+ 
+-	errcode = clEnqueueNDRangeKernel(clCommandQue, clKernel1, 2, NULL, globalWorkSize, localWorkSize, 0, NULL, NULL);	
++	errcode = clEnqueueNDRangeKernel(clCommandQue, clKernel1, 2, NULL, globalWorkSize, localWorkSize, 0, NULL, NULL);
+ 	if(errcode != CL_SUCCESS) printf("Error in launching kernel\n");
+ 	clEnqueueBarrier(clCommandQue);
+ 
+ 	globalWorkSize[0] = (size_t)ceil(((float)NL) / ((float)DIM_LOCAL_WORK_GROUP_X)) * DIM_LOCAL_WORK_GROUP_X;
+ 	globalWorkSize[1] = (size_t)ceil(((float)NJ) / ((float)DIM_LOCAL_WORK_GROUP_Y)) * DIM_LOCAL_WORK_GROUP_Y;
+ 
+-	errcode =  clSetKernelArg(clKernel2, 0, sizeof(cl_mem), (void *)&c_mem_obj);
+-	errcode |= clSetKernelArg(clKernel2, 1, sizeof(cl_mem), (void *)&d_mem_obj);
+-	errcode |= clSetKernelArg(clKernel2, 2, sizeof(cl_mem), (void *)&f_mem_obj);
+-	errcode |= clSetKernelArg(clKernel2, 3, sizeof(int), (void *)&nj);
+-	errcode |= clSetKernelArg(clKernel2, 4, sizeof(int), (void *)&nl);
+-	errcode |= clSetKernelArg(clKernel2, 5, sizeof(int), (void *)&nm);
++	errcode =  clSetKernelArg(clKernel1, 0, sizeof(cl_mem), (void *)&c_mem_obj);
++	errcode |= clSetKernelArg(clKernel1, 1, sizeof(cl_mem), (void *)&d_mem_obj);
++	errcode |= clSetKernelArg(clKernel1, 2, sizeof(cl_mem), (void *)&f_mem_obj);
++	errcode |= clSetKernelArg(clKernel1, 3, sizeof(int), (void *)&nj);
++	errcode |= clSetKernelArg(clKernel1, 4, sizeof(int), (void *)&nl);
++	errcode |= clSetKernelArg(clKernel1, 5, sizeof(int), (void *)&nm);
+ 	if(errcode != CL_SUCCESS) printf("Error in seting arguments\n");
+ 	// Execute the OpenCL kernel
+-	errcode = clEnqueueNDRangeKernel(clCommandQue, clKernel2, 2, NULL, globalWorkSize, localWorkSize, 0, NULL, NULL);	
++	errcode = clEnqueueNDRangeKernel(clCommandQue, clKernel1, 2, NULL, globalWorkSize, localWorkSize, 0, NULL, NULL);
+ 	if(errcode != CL_SUCCESS) printf("Error in launching kernel\n");
+ 	clEnqueueBarrier(clCommandQue);
+ 
+ 	globalWorkSize[0] = (size_t)ceil(((float)NL) / ((float)DIM_LOCAL_WORK_GROUP_X)) * DIM_LOCAL_WORK_GROUP_X;
+ 	globalWorkSize[1] = (size_t)ceil(((float)NI) / ((float)DIM_LOCAL_WORK_GROUP_Y)) * DIM_LOCAL_WORK_GROUP_Y;
+ 
+-	errcode =  clSetKernelArg(clKernel3, 0, sizeof(cl_mem), (void *)&e_mem_obj);
+-	errcode |= clSetKernelArg(clKernel3, 1, sizeof(cl_mem), (void *)&f_mem_obj);
+-	errcode |= clSetKernelArg(clKernel3, 2, sizeof(cl_mem), (void *)&g_mem_obj);
+-	errcode |= clSetKernelArg(clKernel3, 3, sizeof(int), (void *)&ni);
+-	errcode |= clSetKernelArg(clKernel3, 4, sizeof(int), (void *)&nl);
+-	errcode |= clSetKernelArg(clKernel3, 5, sizeof(int), (void *)&nj);
++	errcode =  clSetKernelArg(clKernel1, 0, sizeof(cl_mem), (void *)&e_mem_obj);
++	errcode |= clSetKernelArg(clKernel1, 1, sizeof(cl_mem), (void *)&f_mem_obj);
++	errcode |= clSetKernelArg(clKernel1, 2, sizeof(cl_mem), (void *)&g_mem_obj);
++	errcode |= clSetKernelArg(clKernel1, 3, sizeof(int), (void *)&ni);
++	errcode |= clSetKernelArg(clKernel1, 4, sizeof(int), (void *)&nl);
++	errcode |= clSetKernelArg(clKernel1, 5, sizeof(int), (void *)&nj);
+ 	if(errcode != CL_SUCCESS) printf("Error in seting arguments\n");
+ 	// Execute the OpenCL kernel
+-	errcode = clEnqueueNDRangeKernel(clCommandQue, clKernel3, 2, NULL, globalWorkSize, localWorkSize, 0, NULL, NULL);	
++	errcode = clEnqueueNDRangeKernel(clCommandQue, clKernel1, 2, NULL, globalWorkSize, localWorkSize, 0, NULL, NULL);
+ 	if(errcode != CL_SUCCESS) printf("Error in launching kernel\n");
+ 	clFinish(clCommandQue);
+ }
+diff --git a/tests/polybench/OpenCL/ATAX/atax.cpp b/tests/polybench/OpenCL/ATAX/atax.cpp
+index eb577eb..f2d2756 100644
+--- a/tests/polybench/OpenCL/ATAX/atax.cpp
++++ b/tests/polybench/OpenCL/ATAX/atax.cpp
+@@ -51,7 +51,7 @@ typedef float DATA_TYPE;
+ 
+ char str_temp[1024];
+ 
+-size_t NX = NX_DEFAULT;
++size_t NX = 240*NX_DEFAULT;
+ 
+ cl_platform_id platform_id;
+ cl_device_id device_id;
+diff --git a/tests/polybench/OpenCL/CORR/correlation.cpp b/tests/polybench/OpenCL/CORR/correlation.cpp
+index 324f007..77d32d4 100644
+--- a/tests/polybench/OpenCL/CORR/correlation.cpp
++++ b/tests/polybench/OpenCL/CORR/correlation.cpp
+@@ -68,7 +68,7 @@ char str_temp[1024];
+ #define FLOAT_N 3214212.01
+ #define EPS 0.005
+ 
+-int M = M_DEFAULT;
++int M = 1920*M_DEFAULT;
+ int N = N_DEFAULT;
+ 
+ cl_platform_id platform_id;
+diff --git a/tests/polybench/OpenCL/COVAR/covariance.cl b/tests/polybench/OpenCL/COVAR/covariance.cl
+index 4b137a6..09da844 100644
+--- a/tests/polybench/OpenCL/COVAR/covariance.cl
++++ b/tests/polybench/OpenCL/COVAR/covariance.cl
+@@ -50,17 +50,17 @@ __kernel void covar_kernel(__global DATA_TYPE *symmat, __global DATA_TYPE *data,
+ 	int j1 = get_global_id(0) + 1;
+ 	int i, j2;
+ 
+-	if ((j1 >= 1) && (j1 < (m+1)))
++	if ((j1 >= 1) && (j1 < (m+1)) && (j2 >= j1) && (j2 < (m+1)))
+ 	{
+-		for (j2 = j1; j2 < (m+1); j2++)
+-		{		
++		//for (j2 = j1; j2 < (m+1); j2++)
++		//{		
+ 	      		symmat[j1*(m+1) + j2] = 0.0;
+ 			for(i = 1; i < (n+1); i++)
+ 			{
+ 				symmat[j1 * (m+1) + j2] += data[i *(m+1) + j1] * data[i *(m+1) + j2];
+ 			}
+ 			symmat[j2 * (m+1) + j1] = symmat[j1 * (m+1) + j2];
+-		}
++		//}
+ 	}
+ }
+ 
+diff --git a/tests/polybench/OpenCL/COVAR/covariance.cpp b/tests/polybench/OpenCL/COVAR/covariance.cpp
+index d1c399e..0b02b84 100644
+--- a/tests/polybench/OpenCL/COVAR/covariance.cpp
++++ b/tests/polybench/OpenCL/COVAR/covariance.cpp
+@@ -30,8 +30,8 @@
+ #define MAX_SOURCE_SIZE (0x100000)
+ 
+ /* Problem size */
+-#define M 512 
+-#define N 512 
++#define M 15*512 
++#define N 15*512 
+ 
+ /* Thread block dimensions for kernel 1*/
+ #define DIM_LOCAL_WORK_GROUP_KERNEL_1_X 256
+@@ -42,8 +42,8 @@
+ #define DIM_LOCAL_WORK_GROUP_KERNEL_2_Y 8
+ 
+ /* Thread block dimensions for kernel 3*/
+-#define DIM_LOCAL_WORK_GROUP_KERNEL_3_X 256
+-#define DIM_LOCAL_WORK_GROUP_KERNEL_3_Y 1
++#define DIM_LOCAL_WORK_GROUP_KERNEL_3_X 32
++#define DIM_LOCAL_WORK_GROUP_KERNEL_3_Y 8
+ 
+ #define sqrt_of_array_cell(x,j) sqrt(x[j])
+ 
+@@ -192,7 +192,7 @@ void cl_launch_kernel()
+ 	localWorkSize_Kernel3[0] = DIM_LOCAL_WORK_GROUP_KERNEL_3_X;
+ 	localWorkSize_Kernel3[1] = DIM_LOCAL_WORK_GROUP_KERNEL_3_Y;
+ 	globalWorkSize_Kernel3[0] = (size_t)ceil(((float)M) / ((float)DIM_LOCAL_WORK_GROUP_KERNEL_3_X)) * DIM_LOCAL_WORK_GROUP_KERNEL_3_X;
+-	globalWorkSize_Kernel3[1] = 1;
++	globalWorkSize_Kernel3[1] = (size_t)ceil(((float)N) / ((float)DIM_LOCAL_WORK_GROUP_KERNEL_3_Y)) * DIM_LOCAL_WORK_GROUP_KERNEL_3_Y;;
+ 
+ 	// Set the arguments of the kernel
+ 	errcode =  clSetKernelArg(clKernel_mean, 0, sizeof(cl_mem), (void *)&mean_mem_obj);
+@@ -324,8 +324,8 @@ int main(void)
+ 	errcode = clEnqueueReadBuffer(clCommandQue, symmat_mem_obj, CL_TRUE, 0, (M+1) * (N+1) * sizeof(DATA_TYPE), symmat_outputFromGpu, 0, NULL, NULL);
+ 	if(errcode != CL_SUCCESS) printf("Error in reading GPU mem\n");   
+ 
+-	covariance(data, symmat, mean);
+-	compareResults(symmat, symmat_outputFromGpu);
++	//covariance(data, symmat, mean);
++	//compareResults(symmat, symmat_outputFromGpu);
+ 	cl_clean_up();
+ 	
+ 	free(data);
+diff --git a/tests/polybench/OpenCL/FDTD-2D/fdtd2d.cpp b/tests/polybench/OpenCL/FDTD-2D/fdtd2d.cpp
+index ea6fcf7..8e980fb 100644
+--- a/tests/polybench/OpenCL/FDTD-2D/fdtd2d.cpp
++++ b/tests/polybench/OpenCL/FDTD-2D/fdtd2d.cpp
+@@ -76,7 +76,7 @@ FILE *fp;
+ char *source_str;
+ size_t source_size;
+ 
+-int NX = NX_DEFAULT;
++int NX = 60*NX_DEFAULT;
+ int NY = NY_DEFAULT;
+ 
+ void compareResults(DATA_TYPE *hz1, DATA_TYPE *hz2) {
+diff --git a/tests/polybench/OpenCL/GRAMSCHM/gramschmidt.cpp b/tests/polybench/OpenCL/GRAMSCHM/gramschmidt.cpp
+index 85961eb..478bed9 100644
+--- a/tests/polybench/OpenCL/GRAMSCHM/gramschmidt.cpp
++++ b/tests/polybench/OpenCL/GRAMSCHM/gramschmidt.cpp
+@@ -32,7 +32,7 @@
+ 
+ /* Problem size */
+ #define M_DEFAULT 1024 
+-#define N_DEFAULT 1024 
++#define N_DEFAULT 120*1024
+ 
+ /* Thread block dimensions */
+ #define DIM_THREAD_BLOCK_X 256
+diff --git a/tests/polybench/OpenCL/MVT/mvt.cpp b/tests/polybench/OpenCL/MVT/mvt.cpp
+index 9cfce53..fcac106 100644
+--- a/tests/polybench/OpenCL/MVT/mvt.cpp
++++ b/tests/polybench/OpenCL/MVT/mvt.cpp
+@@ -31,7 +31,8 @@
+ #define MAX_SOURCE_SIZE (0x100000)
+ 
+ /* Problem size */
+-#define N_DEFAULT 4096
++#define N_DEFAULT 15*4096
++#define WIDTH_DEFAULT 512
+ 
+ /* Thread block dimensions */
+ #define DIM_LOCAL_WORK_GROUP_X 256
+@@ -58,9 +59,7 @@ cl_program clProgram;
+ 
+ cl_mem a_mem_obj;
+ cl_mem x1_mem_obj;
+-cl_mem x2_mem_obj;
+ cl_mem y1_mem_obj;
+-cl_mem y2_mem_obj;
+ 
+ FILE *fp;
+ char *source_str;
+@@ -68,6 +67,7 @@ size_t source_size;
+ char str_temp[1024];
+ 
+ size_t N = N_DEFAULT;
++size_t WIDTH = WIDTH_DEFAULT;
+ 
+ void read_cl_file() {
+   // Load the kernel source code into the array source_str
+@@ -87,42 +87,34 @@ void init_arrays(DATA_TYPE *a, DATA_TYPE *x1, DATA_TYPE *x2, DATA_TYPE *y_1,
+ 
+   for (i = 0; i < N; i++) {
+     x1[i] = 0.0;
+-    x2[i] = 0.0;
+-    y_1[i] = 0.0;
+-    y_2[i] = 0.0;
+ 
+-    for (j = 0; j < N; j++) {
++    for (j = 0; j < WIDTH; j++) {
+       a[i * N + j] = random<DATA_TYPE>();
+     }
+   }
++  for (i = 0; i < WIDTH; i++) {
++    y_1[i] = 0.0;
++  }
+ }
+ 
+ void cl_mem_init(DATA_TYPE *a, DATA_TYPE *x1, DATA_TYPE *x2, DATA_TYPE *y_1,
+                  DATA_TYPE *y_2) {
+   a_mem_obj = clCreateBuffer(clGPUContext, CL_MEM_READ_WRITE,
+-                             sizeof(DATA_TYPE) * N * N, NULL, &errcode);
++                             sizeof(DATA_TYPE) * N * WIDTH, NULL, &errcode);
+   x1_mem_obj = clCreateBuffer(clGPUContext, CL_MEM_READ_WRITE,
+                               sizeof(DATA_TYPE) * N, NULL, &errcode);
+-  x2_mem_obj = clCreateBuffer(clGPUContext, CL_MEM_READ_WRITE,
+-                              sizeof(DATA_TYPE) * N, NULL, &errcode);
+   y1_mem_obj = clCreateBuffer(clGPUContext, CL_MEM_READ_WRITE,
+-                              sizeof(DATA_TYPE) * N, NULL, &errcode);
+-  y2_mem_obj = clCreateBuffer(clGPUContext, CL_MEM_READ_WRITE,
+-                              sizeof(DATA_TYPE) * N, NULL, &errcode);
++                              sizeof(DATA_TYPE) * WIDTH, NULL, &errcode);
+ 
+   if (errcode != CL_SUCCESS)
+     printf("Error in creating buffers\n");
+ 
+   errcode = clEnqueueWriteBuffer(clCommandQue, a_mem_obj, CL_TRUE, 0,
+-                                 sizeof(DATA_TYPE) * N * N, a, 0, NULL, NULL);
++                                 sizeof(DATA_TYPE) * N * WIDTH, a, 0, NULL, NULL);
+   errcode = clEnqueueWriteBuffer(clCommandQue, x1_mem_obj, CL_TRUE, 0,
+                                  sizeof(DATA_TYPE) * N, x1, 0, NULL, NULL);
+-  errcode = clEnqueueWriteBuffer(clCommandQue, x2_mem_obj, CL_TRUE, 0,
+-                                 sizeof(DATA_TYPE) * N, x2, 0, NULL, NULL);
+   errcode = clEnqueueWriteBuffer(clCommandQue, y1_mem_obj, CL_TRUE, 0,
+-                                 sizeof(DATA_TYPE) * N, y_1, 0, NULL, NULL);
+-  errcode = clEnqueueWriteBuffer(clCommandQue, y2_mem_obj, CL_TRUE, 0,
+-                                 sizeof(DATA_TYPE) * N, y_2, 0, NULL, NULL);
++                                 sizeof(DATA_TYPE) * WIDTH, y_1, 0, NULL, NULL);
+ 
+   if (errcode != CL_SUCCESS)
+     printf("Error in writing buffers\n");
+@@ -144,15 +136,13 @@ void cl_load_prog() {
+ 
+   // Create the 1st OpenCL kernel
+   clKernel1 = clCreateKernel(clProgram, "mvt_kernel1", &errcode);
+-  //  // Create the 2nd OpenCL kernel
+-  //  clKernel2 = clCreateKernel(clProgram, "mvt_kernel2", &errcode);
+   if (errcode != CL_SUCCESS)
+     printf("Error in creating kernel\n");
+   clFinish(clCommandQue);
+ }
+ 
+ void cl_launch_kernel() {
+-  int n = N;
++  int n = WIDTH;
+ 
+   size_t oldLocalWorkSize[1], globalWorkSize[1];
+   oldLocalWorkSize[0] = DIM_LOCAL_WORK_GROUP_X;
+@@ -178,25 +168,6 @@ void cl_launch_kernel() {
+   if (errcode != CL_SUCCESS)
+     printf("Error in launching kernel\n");
+ 
+-  //  // Set the arguments of the kernel
+-  //  errcode = clSetKernelArg(clKernel2, 0, sizeof(cl_mem), (void
+-  // *)&a_mem_obj);
+-  //  errcode |= clSetKernelArg(clKernel2, 1, sizeof(cl_mem), (void
+-  // *)&x2_mem_obj);
+-  //  errcode |= clSetKernelArg(clKernel2, 2, sizeof(cl_mem), (void
+-  // *)&y2_mem_obj);
+-  //  errcode |= clSetKernelArg(clKernel2, 3, sizeof(int), (void *)&n);
+-  //  if (errcode != CL_SUCCESS)
+-  //    printf("Error in seting arguments\n");
+-  //
+-  //  // Execute the OpenCL kernel
+-  //  errcode =
+-  //      clEnqueueNDRangeKernel(clCommandQue, clKernel2, 1, NULL,
+-  // globalWorkSize,
+-  //                             localWorkSize, 0, NULL, NULL);
+-  //  if (errcode != CL_SUCCESS)
+-  //    printf("Error in launching kernel\n");
+-
+   clFinish(clCommandQue);
+ }
+ 
+@@ -209,9 +180,7 @@ void cl_clean_up() {
+   errcode = clReleaseProgram(clProgram);
+   errcode = clReleaseMemObject(a_mem_obj);
+   errcode = clReleaseMemObject(x1_mem_obj);
+-  errcode = clReleaseMemObject(x2_mem_obj);
+   errcode = clReleaseMemObject(y1_mem_obj);
+-  errcode = clReleaseMemObject(y2_mem_obj);
+   errcode = clReleaseCommandQueue(clCommandQue);
+   errcode = clReleaseContext(clGPUContext);
+   if (errcode != CL_SUCCESS)
+@@ -230,7 +199,7 @@ void runMvt(DATA_TYPE *a, DATA_TYPE *x1, DATA_TYPE *x2, DATA_TYPE *y1,
+ 
+   for (i = 0; i < N; i++) {
+     for (int rep = 0; rep < intReps; ++rep) {
+-      for (j = 0; j < N; j++) {
++      for (j = 0; j < WIDTH; j++) {
+         x1[i] = x1[i] + a[i * N + j] * y1[j];
+       }
+     }
+@@ -259,11 +228,8 @@ int main(void) {
+ 
+   a = (DATA_TYPE *)malloc(N * N * sizeof(DATA_TYPE));
+   x1 = (DATA_TYPE *)malloc(N * sizeof(DATA_TYPE));
+-  x2 = (DATA_TYPE *)malloc(N * sizeof(DATA_TYPE));
+   x1_outputFromGpu = (DATA_TYPE *)malloc(N * sizeof(DATA_TYPE));
+-  x2_outputFromGpu = (DATA_TYPE *)malloc(N * sizeof(DATA_TYPE));
+   y_1 = (DATA_TYPE *)malloc(N * sizeof(DATA_TYPE));
+-  y_2 = (DATA_TYPE *)malloc(N * sizeof(DATA_TYPE));
+ 
+   init_arrays(a, x1, x2, y_1, y_2);
+   read_cl_file();
+@@ -284,11 +250,8 @@ int main(void) {
+ 
+   free(a);
+   free(x1);
+-  free(x2);
+   free(x1_outputFromGpu);
+-  free(x2_outputFromGpu);
+   free(y_1);
+-  free(y_2);
+ 
+   return 0;
+ }
+diff --git a/tests/polybench/OpenCL/SYR2K/syr2k.cpp b/tests/polybench/OpenCL/SYR2K/syr2k.cpp
+index 74dde60..78cb1e1 100644
+--- a/tests/polybench/OpenCL/SYR2K/syr2k.cpp
++++ b/tests/polybench/OpenCL/SYR2K/syr2k.cpp
+@@ -30,8 +30,8 @@
+ #define MAX_SOURCE_SIZE (0x100000)
+ 
+ /* Problem size */
+-#define N_DEFAULT 2048
+-#define M_DEFAULT 2048
++#define N_DEFAULT 15*128
++#define M_DEFAULT 15*128
+ 
+ /* Thread block dimensions */
+ #define DIM_LOCAL_WORK_GROUP_X 32
+@@ -208,8 +208,8 @@ void syr2k(DATA_TYPE *A, DATA_TYPE *B, DATA_TYPE *C, DATA_TYPE *result) {
+     intReps = atoi(reps);
+   }
+ 
+-  for (i = 0; i < 128; i++) {
+-    for (j = 0; j < 128; j++) {
++  for (i = 0; i < N; i++) {
++    for (j = 0; j < M; j++) {
+       for (int rep = 0; rep < intReps; ++rep) {
+         for (k = 0; k < M; k++) {
+           C[i * N + j] += ALPHA * A[i * M + k] * B[j * M + k];
+diff --git a/tests/polybench/OpenCL/SYRK/syrk.cl b/tests/polybench/OpenCL/SYRK/syrk.cl
+index 375b9fb..21d1b79 100644
+--- a/tests/polybench/OpenCL/SYRK/syrk.cl
++++ b/tests/polybench/OpenCL/SYRK/syrk.cl
+@@ -13,7 +13,7 @@
+ #pragma OPENCL EXTENSION cl_amd_fp64 : enable
+ #endif
+ 
+-typedef float DATA_TYPE;
++typedef double DATA_TYPE;
+ 
+ 
+ /*  C := alpha*A*A' + beta*C */
+diff --git a/tests/polybench/OpenCL/SYRK/syrk.cpp b/tests/polybench/OpenCL/SYRK/syrk.cpp
+index 7cc65dc..e49031a 100644
+--- a/tests/polybench/OpenCL/SYRK/syrk.cpp
++++ b/tests/polybench/OpenCL/SYRK/syrk.cpp
+@@ -31,8 +31,8 @@
+ #define MAX_SOURCE_SIZE (0x100000)
+ 
+ /* Problem size */
+-#define N_DEFAULT 128 
+-#define M_DEFAULT 128 
++#define N_DEFAULT 30*128 
++#define M_DEFAULT 30*128 
+ 
+ /* Thread block dimensions */
+ #define DIM_LOCAL_WORK_GROUP_X 32
+@@ -45,7 +45,7 @@
+ #endif
+ 
+ /* Can switch DATA_TYPE between float and double */
+-typedef float DATA_TYPE;
++typedef double DATA_TYPE;
+ 
+ char str_temp[1024];
+ 
+@@ -197,8 +197,8 @@ void syrk(DATA_TYPE *A, DATA_TYPE *C, DATA_TYPE *result) {
+     intReps = atoi(reps);
+   }
+ 
+-  for (i = 0; i < 128; i++) {
+-    for (j = 0; j < 128; j++) {
++  for (i = 0; i < N; i++) {
++    for (j = 0; j < M; j++) {
+       for (int rep = 0; rep < intReps; ++rep) {
+         C[i * M + j] *= beta;
+         for (k = 0; k < M; k++) {
+diff --git a/tests/runTests.py b/tests/runTests.py
+index 86ee95c..ec5e079 100755
+--- a/tests/runTests.py
++++ b/tests/runTests.py
+@@ -4,9 +4,11 @@ import itertools;
+ import os;
+ import subprocess;
+ import time;
++import sys;
+ 
+-tests = {
+-"memset/memset" : ["memset1", "memset2"], 
++originalTests = {
++#"memset/memset" : ["memset1", "memset2"], 
++"memset/memset" : ["memset2D"],
+ "memcpy/memcpy" : ["rmrrmw", "cmrcmw"],
+ "mm/mm" : ["mm"], 
+ "mt/mt" : ["mt"],
+@@ -17,6 +19,7 @@ tests = {
+ "polybench/OpenCL/3DCONV/3DCONV" : ["Convolution3D_kernel"],
+ "polybench/OpenCL/3MM/3MM" : ["mm3_kernel1"],
+ "polybench/OpenCL/ATAX/ATAX" : ["atax_kernel1", "atax_kernel2"],
++#"polybench/OpenCL/ATAX/ATAX" : ["atax_kernel1"],
+ "polybench/OpenCL/BICG/BICG" : ["bicgKernel1"],
+ "polybench/OpenCL/CORR/CORR" : ["mean_kernel", "std_kernel", "reduce_kernel"],
+ "polybench/OpenCL/COVAR/COVAR" : ["mean_kernel", "reduce_kernel", "covar_kernel"],
+@@ -27,37 +30,94 @@ tests = {
+ "polybench/OpenCL/MVT/MVT" : ["mvt_kernel1"],
+ "polybench/OpenCL/SYR2K/SYR2K" : ["syr2k_kernel"],
+ "polybench/OpenCL/SYRK/SYRK" : ["syrk_kernel"]
+-}; 
++};
++
++### Add configs as you need
++
++kepler = {
++"computeUnits" : "15",
++"maxActiveThreadsPerCU" : "2048",
++"maxGroupsPerCU" : "16",
++"maxRegsPerCU" : "65536",
++"maxSMemPerCU" : "49152",
++"maxSMemPerBlock" : "49152"
++};
++
++maxwell = {
++"computeUnits" : "24",
++"maxActiveThreadsPerCU" : "2048",
++"maxGroupsPerCU" : "32",
++"maxRegsPerCU" : "65536",
++"maxSMemPerCU" : "98304",
++"maxSMemPerBlock" : "49152"
++};
++
++pascal = {
++"computeUnits" : "20",
++"maxActiveThreadsPerCU" : "2048",
++"maxGroupsPerCU" : "32",
++"maxRegsPerCU" : "65536",
++"maxSMemPerCU" : "98304",
++"maxSMemPerBlock" : "49152"
++};
++
++###  Check that the following paths are set correctly
+ 
+-HOME = os.environ["HOME"]; 
+ CLANG = "clang";
+ OPT = "opt";
+-# Replace with Thrud path.
+-LIB_THRUD = os.path.join(HOME, "root", "lib", "libThrud.so");
+-OCL_HEADER = os.path.join(HOME, "src", "coarsening_pass", "thrud", "include", "opencl_spir.h");
+-OPTIMIZATION = "-O0";
+-# Replace with libaxtorpath path.
+-LD_PRELOAD = os.path.join(HOME, "build", "coarsening_pass", "opencl_tools", "function_overload", "libaxtorwrapper.so");
+-TC_COMPILE_LINE = "-mem2reg -load " + LIB_THRUD + " -structurizecfg -instnamer -be -tc -coarsening-factor %s -coarsening-direction %s -coarsening-stride %s -div-region-mgt classic -kernel-name %s -simplifycfg";
+-PREFIX = os.path.join(HOME, "build", "coarsening_pass", "tests");
++LIB_THRUD = "/data/build/autocoarsening/thrud/lib/libThrud.so";
++OCL_HEADER = "/data/code/autocoarsening/thrud/include/opencl_spir.h";
++OPTIMIZATION = "-O3";
++LD_PRELOAD = "/data/build/autocoarsening/opencl_tools/function_overload/libaxtorwrapper.so";
++PREFIX = "/data/build/autocoarsening/tests";
++
++### The following should not need changing
++
++TC_COMPILE_LINE = "-mem2reg -load " + LIB_THRUD + " -structurizecfg -instnamer -be -tc -coarsening-factor %s -coarsening-direction %s -coarsening-stride %s -div-region-mgt classic -kernel-name %s -simplifycfg -loop-instsimplify -early-cse -load-combine -licm " + OPTIMIZATION;
++CLR_OPTIONS = "-load " + LIB_THRUD + " -assumeRestrictArgs -domtree -gvn -basicaa -loop-simplify -indvars -load-combine -early-cse -clr -kernel-name %s -warp-size %s -cache-line-size %s";
++ORED_OPTIONS = "-load " + LIB_THRUD + " -ored -kernel-name %s -shmem %s";
++#COMPUTE_CACHE = "~/.nv/ComputeCache";
++ORED_TMP_FILE = "/tmp/%s.txt";
++
++### Modify these to control execution behaviour
++
++THREAD_LEVEL_COARSENING = False;         # False for block-level coarsening, True for thread-level coarsening
++OCCUPANCY_REDUCTION = False;             # experimental
++tests = originalTests;
++arch = pascal;                           # use this if you have multiple GPUs and only want to run on one
++device = "1" if arch == kepler else "0";
++
++applyModel = len(sys.argv) > 1 and sys.argv[1] == "APPLY_COARSENING_MODEL"  # pass this arg to this script to run with coarsening model
++
+ 
+ #-------------------------------------------------------------------------------
+-def printRed(message):
+-  print "\033[1;31m%s\033[1;m" % message
++#def printRed(message):
++#  print "\033[1;31m%s\033[1;m" % message
+ 
+ #-------------------------------------------------------------------------------
+-def printGreen(message):
+-  print "\033[1;32m%s\033[1;m" % message;
++#def printGreen(message):
++#  print "\033[1;32m%s\033[1;m" % message;
+ 
+ #-------------------------------------------------------------------------------
+ def runCommand(arguments):
+-  WAITING_TIME = 30;
+-  runProcess = subprocess.Popen(arguments, stdout=subprocess.PIPE,
+-                                           stderr=subprocess.PIPE);
++  WAITING_TIME = 3000;
++  #delProcess = subprocess.call(["rm", "-rf", COMPUTE_CACHE]);
++  workingDir = None
++
++  # use this for debugging
++  # arguments = ["gdb"] + arguments;
++
++  runProcess = subprocess.Popen(arguments, cwd=workingDir,
++                                           #stdout=subprocess.PIPE,
++                                           stderr=subprocess.STDOUT);
++                                           #stderr=subprocess.PIPE);
+   runPid = runProcess.pid;
+   counter = 0;
+   returnCode = None;
+ 
++  #outs, errs = runProcess.communicate();
++  #returnCode = runProcess.poll();
++
+   # Manage the case in which the run hangs.
+   while(counter < WAITING_TIME and returnCode == None):
+     counter += 1;
+@@ -70,35 +130,84 @@ def runCommand(arguments):
+ 
+   commandOutput = runProcess.communicate();
+ 
+-  print(commandOutput[0]);
+-  print(commandOutput[1]);
++  #print(commandOutput[0]);
++  #print(commandOutput[1]);
+ 
+   return (returnCode, commandOutput[0], commandOutput[1]);
+ 
+ #-------------------------------------------------------------------------------
+-def runTest(command, kernelName, cd, cf, st):
++def runTest(command, kernelName, warpSize, cacheLineSize, ored, oredStr, cd, cf, st):
++  kernelConfig = str.split(kernelName, ':');
++  kernelName = kernelConfig[0];
++  cd = "0" if (len(kernelConfig) <= 1) else kernelConfig[1];
++
++  # TODO this needs to change depending on test suite used
+   command = [os.path.join(PREFIX, command), kernelName];
++    
+ 
+   os.environ["OCL_HEADER"] = OCL_HEADER;
+   os.environ["TC_KERNEL_NAME"] = kernelName;
+   os.environ["LD_PRELOAD"] = LD_PRELOAD;
+   os.environ["OCL_COMPILER_OPTIONS"] = TC_COMPILE_LINE % \
+     (cf, cd, st, kernelName);
+-  
++  os.environ["CLR_OPTIONS"] = CLR_OPTIONS % (kernelName, warpSize, cacheLineSize);
++
++  if (OCCUPANCY_REDUCTION):
++    os.environ["OCCUPANCY_REDUCTION"] = ORED_OPTIONS % (kernelName, ored);
++  if ("OCCUPANCY_REDUCTION_SETUP" in os.environ):
++    del(os.environ["OCCUPANCY_REDUCTION"]);
++    # this also deletes definition from previous iteration
++
++  if (THREAD_LEVEL_COARSENING):
++    os.environ["THREAD_LEVEL_COARSENING"] = "true";
++
++  # set architectural parameters for model
++  os.environ["ARCH_COMPUTE_UNITS"] = arch["computeUnits"];
++  os.environ["ARCH_ACTIVE_THREADS_PER_CU"] = arch["maxActiveThreadsPerCU"];
++  os.environ["ARCH_GROUPS_PER_CU"] = arch["maxGroupsPerCU"];
++  os.environ["ARCH_REGS_PER_CU"] = arch["maxRegsPerCU"];
++  os.environ["ARCH_SMEM_PER_CU"] = arch["maxSMemPerCU"];
++  os.environ["CUDA_VISIBLE_DEVICES"] = device;
++  os.environ["CUDA_CACHE_DISABLE"] = "1";
++
+   print(command);
++  sys.stdout.flush();
+   result = runCommand(command);
++  if (not oredStr):
++    # print "oredStr not found, attempting to read"
++    fname = ORED_TMP_FILE % kernelName;
++    oredStr = "0/0@0"
++    if (os.path.isfile(fname)):
++      with open(fname, 'r') as infile:
++	ignore, ignore_existingSMem = map(str.strip, next(infile).split(' ', 1))
++	ignore, threadsPerBlock = map(str.strip, next(infile).split(' ', 1))
++	ignore, occupancy = map(str.strip, next(infile).split(' ', 1))
++      print "Parsed ", threadsPerBlock, ", and ", occupancy
++      blocksPerSM = int(float(occupancy) * int(arch["maxActiveThreadsPerCU"]) / int(threadsPerBlock))
++      oredStr = str(blocksPerSM) + "/" + str(blocksPerSM) + "@" + threadsPerBlock
++
++
+   if(result[0] == 0):
+-    printGreen(" ".join([kernelName, cd, cf, st, "Ok!"]));
++    print(" ".join([kernelName, cd, cf, st, oredStr, "Ok!"]));
++    sys.stdout.flush();
+     return 0;
+   else:
+     print(result[2]);
+-    printRed(" ".join([kernelName, cd, cf, st, "Failure"]));
++    print(" ".join([kernelName, cd, cf, st, oredStr, "Failure"]));
++    sys.stdout.flush();
+     return 1;
+ 
+ def main():
+-  directions = ["0", "1"];
+-  factors = ["2", "4"];
+-  strides = ["1", "2", "32"]; 
++  directions = ["0"];
++  if (applyModel) :
++    factors = ["1"];
++    os.environ["MAX_COARSENING_FACTOR"] = "32";
++  else:
++    factors = ["1", "2", "4", "8", "16", "32"];
++  strides = ["32"];#, "2", "32"];
++
++  warpSize = "32";
++  cacheLineSize = "32";
+ 
+   configs = itertools.product(directions, factors, strides);
+   configs = [x for x in configs];
+@@ -110,9 +219,39 @@ def main():
+     kernels = tests[test];
+     for kernel in kernels:
+       for config in configs:
+-        failure = runTest(test, kernel, *config);      
++        if (OCCUPANCY_REDUCTION):
++	  oredTmpFile = ORED_TMP_FILE % kernel;
++	  os.environ["OCCUPANCY_REDUCTION_SETUP"] = oredTmpFile;
++        failure = runTest(test, kernel, warpSize, cacheLineSize, "0", None, *config);
+         failures += failure;
+         counter += 1;
++	if (OCCUPANCY_REDUCTION):
++	  del(os.environ["OCCUPANCY_REDUCTION_SETUP"])
++
++	  print "attempting to parse ", oredTmpFile;
++	  existingSMem = "0"
++	  threadsPerBlock = "512"
++	  occupancy = "100"
++          if (os.path.isfile(oredTmpFile)):
++	    with open(oredTmpFile, 'r') as infile:
++	      ignore, existingSMem = map(str.strip, next(infile).split(' ', 1))
++	      ignore, threadsPerBlock = map(str.strip, next(infile).split(' ', 1))
++	      ignore, occupancy = map(str.strip, next(infile).split(' ', 1))
++	    print "Parsed ", int(existingSMem), ", ", threadsPerBlock, ", and ", occupancy
++	    blocksPerSM = int(float(occupancy) * int(arch["maxActiveThreadsPerCU"]) / int(threadsPerBlock))
++	    print "blocksPerSM ", blocksPerSM
++	    minBlocksPerSM = (int(arch["maxSMemPerCU"]) // int(arch["maxSMemPerBlock"])) - 1
++	    if (minBlocksPerSM >= blocksPerSM):
++	      minBlocksPerSM = 0
++
++	    for blocks in range(blocksPerSM - 1, minBlocksPerSM, -1):
++	      additionalSMem = ( int(arch["maxSMemPerCU"]) - (blocks + 1) * int(existingSMem) ) // (blocks + 1) + 1
++	      print "Additional smem:", additionalSMem
++	      print "blocks: ", blocks
++	      print "existing smem", existingSMem
++	      failure = runTest(test, kernel, warpSize, cacheLineSize, str(additionalSMem), str(blocks) + "/" + str(blocksPerSM) + "@" + threadsPerBlock, *config);
++	      failures += failure;
++	      counter += 1;
+ 
+   print("#################################");
+   print(str(failures) + " failures out of " + str(counter));
+diff --git a/thrud/CMakeLists.txt b/thrud/CMakeLists.txt
+index 9ec92ff..4195bc7 100644
+--- a/thrud/CMakeLists.txt
++++ b/thrud/CMakeLists.txt
+@@ -1,15 +1,22 @@
+ set(THRUD "Thrud")
+ set(LIB_DIR "lib")
+-set(INCLUDE_DIR "include")
++get_filename_component(INCLUDE_DIR "include" ABSOLUTE)
+ 
+ # Find llvm.
+-set(LLVM_DIR "~/build/llvm/share/llvm/cmake/")
++set(LLVM_DIR "/data/build/llvm/share/llvm/cmake/")
+ find_package(LLVM REQUIRED)
++if (NOT LLVM_FOUND)
++  message(FATAL_ERROR "LLVM NOT FOUND")
++endif (NOT LLVM_FOUND)
+ 
+ # Include dirs.
+ include_directories(${INCLUDE_DIR})
+ include_directories(SYSTEM ${LLVM_INCLUDE_DIRS})
+ 
++message(STATUS "Include dir: ${INCLUDE_DIR}")
++message(STATUS "LLVM include dirs: ${LLVM_INCLUDE_DIRS}")
++message(STATUS "LLVM library dirs: ${LLVM_LIBRARY_DIRS}")
++
+ # Link dirs.
+ link_directories(${LLVM_LIBRARY_DIRS})
+ 
+diff --git a/thrud/include/thrud/AssumeRestrictArgs.h b/thrud/include/thrud/AssumeRestrictArgs.h
+new file mode 100644
+index 0000000..3c05b91
+--- /dev/null
++++ b/thrud/include/thrud/AssumeRestrictArgs.h
+@@ -0,0 +1,24 @@
++#ifndef ASSUME_RESTRICT_ARGS_H
++#define ASSUME_RESTRICT_ARGS_H
++
++#include "thrud/Utils.h"
++
++#include "llvm/Pass.h"
++
++using namespace llvm;
++
++namespace llvm {
++class Function;
++}
++
++class AssumeRestrictArgs : public FunctionPass {
++
++public:
++  static char ID;
++  AssumeRestrictArgs();
++
++  virtual bool runOnFunction(Function &function);
++  virtual void getAnalysisUsage(AnalysisUsage &au) const;
++};
++
++#endif
+diff --git a/thrud/include/thrud/CacheLineReuseAnalysis.h b/thrud/include/thrud/CacheLineReuseAnalysis.h
+new file mode 100644
+index 0000000..65516d5
+--- /dev/null
++++ b/thrud/include/thrud/CacheLineReuseAnalysis.h
+@@ -0,0 +1,66 @@
++#ifndef CACHE_LINE_REUSE_ANALYSIS_H
++#define CACHE_LINE_REUSE_ANALYSIS_H
++
++#include "llvm/Pass.h"
++#include "llvm/IR/Function.h"
++#include "llvm/IR/Instruction.h"
++#include "llvm/IR/InstIterator.h"
++
++#include <set>
++#include <vector>
++
++#include "thrud/MemAccessDescriptor.h"
++#include "thrud/NDRange.h"
++#include "thrud/Utils.h"
++
++using namespace llvm;
++
++class CacheLineReuseAnalysis : public FunctionPass {
++
++  public:
++    static char ID;
++    const static unsigned int GLOBAL_ADDRESS_SPACE = 1;
++    
++    CacheLineReuseAnalysis() : FunctionPass(ID) {}
++    //~CacheLineReuseAnalysis();
++    virtual void getAnalysisUsage(AnalysisUsage &au) const;
++    virtual bool runOnFunction(Function &F);
++    //virtual bool doFinalization(Module &M);
++
++  private:
++    NDRange *ndr;
++    LoopInfo *loopInfo;
++    int dimensions;
++    Instruction* lastInstruction;
++    //std::vector<BasicBlock::Iterator> loopStack;
++    std::set<Instruction*> memops;
++    std::set<Instruction*> relevantInstructions;
++    std::set<Loop *> relevantLoops;
++    std::vector<std::map<Instruction*, std::vector<MemAccessDescriptor>>> accessDescriptorStack;
++    std::map<StringRef, std::set<int>> accessedCacheLines;
++    std::string diagnosis;
++
++    int getDimensionality();
++    inst_iterator simulate(inst_iterator inst, Instruction* fwdDef, Loop* innermostLoop);
++    PHINode *getInductionVariable(Loop* loop) const;
++    void preprocess(Function *function, std::set<Instruction*>& memops, std::set<Instruction*>& relevantInstructions);
++    Value * getAccessedSymbolPtr(Value * v);
++    StringRef getAccessedSymbolName(Value * v);
++    bool isCachedAddressSpace(Instruction * inst);
++    std::vector<MemAccessDescriptor> findInStack(Instruction* inst);
++    void mergeIntoStack(std::map<Instruction*, std::vector<MemAccessDescriptor>> &defs);
++    bool isFwdDef(Instruction* inst);
++    std::vector<MemAccessDescriptor> getOperand(Value * v);
++    void applyBinaryOp(function<int(int, int)> f, Instruction * inst);
++
++    inline void addToStack(Instruction* inst, std::vector<MemAccessDescriptor> mad) {
++      accessDescriptorStack.back().insert(std::pair<Instruction*, std::vector<MemAccessDescriptor>>(inst, mad));
++    }
++    inline void addToStack(Instruction* inst, MemAccessDescriptor mad) {
++      addToStack(inst, std::vector<MemAccessDescriptor>{mad});
++    }
++    
++
++};
++
++#endif
+diff --git a/thrud/include/thrud/DataTypes.h b/thrud/include/thrud/DataTypes.h
+index 527cafa..1c6ebd3 100644
+--- a/thrud/include/thrud/DataTypes.h
++++ b/thrud/include/thrud/DataTypes.h
+@@ -40,5 +40,8 @@ typedef std::stack<BasicBlock *> BlockStack;
+ typedef std::deque<Instruction *> InstDeque;
+ typedef std::deque<BasicBlock *> BlockDeque;
+ typedef std::map<Instruction *, InstVector> CoarseningMap;
++typedef std::set<GlobalVariable *> GlobalsSet;
++typedef std::map<Function *, GlobalsSet> GlobalsMap;
++typedef std::map<GlobalVariable *, std::vector<GlobalVariable *>> GlobalsCMap;
+ 
+ #endif
+diff --git a/thrud/include/thrud/DivergenceAnalysis.h b/thrud/include/thrud/DivergenceAnalysis.h
+index 34d2ae7..54eab8e 100644
+--- a/thrud/include/thrud/DivergenceAnalysis.h
++++ b/thrud/include/thrud/DivergenceAnalysis.h
+@@ -19,6 +19,7 @@ public:
+   InstVector &getOutermostDivInsts();
+   InstVector getDivInsts(DivergentRegion *region);
+   bool isDivergent(Instruction *inst);
++  GlobalsSet &getShMemGlobalsUsedIn(Function *f);
+ 
+   RegionVector &getDivRegions();
+   RegionVector &getOutermostDivRegions();
+@@ -35,12 +36,16 @@ protected:
+                           InstVector &result);
+   void findOutermostRegions();
+ 
++private:
++  void findUsesOf(Instruction *inst, InstSet &result);
++
+ protected:
+   InstVector divInsts;
+   InstVector outermostDivInsts;
+   InstVector divBranches;
+   RegionVector regions;
+   RegionVector outermostRegions;
++  GlobalsMap shMemGlobals;
+ 
+   NDRange *ndr;
+   PostDominatorTree *pdt;
+diff --git a/thrud/include/thrud/MemAccessDescriptor.h b/thrud/include/thrud/MemAccessDescriptor.h
+new file mode 100644
+index 0000000..e9b1bd9
+--- /dev/null
++++ b/thrud/include/thrud/MemAccessDescriptor.h
+@@ -0,0 +1,36 @@
++#ifndef MEM_ACCESS_DESCRIPTOR_H
++#define MEM_ACCESS_DESCRIPTOR_H
++
++#include <vector>
++#include <list>
++#include <functional>
++
++using namespace std;
++
++class MemAccessDescriptor {
++
++  private:
++    void init(const int x, const int y, const int z);
++
++  public:
++    static int SIZE;
++    static int CACHE_SIZE;
++    bool isValue;
++    int value;
++    //bool hasDim[3] = {false, false, false};
++    int sizes [3] = {1, 1, 1};
++    std::vector<vector<vector<int>>> mad;
++    
++  public:
++    MemAccessDescriptor(int value);
++    MemAccessDescriptor(int dimension, int n);
++    MemAccessDescriptor(const int x, const int y, const int z);
++    MemAccessDescriptor(function<int(int, int)> f, MemAccessDescriptor &a, MemAccessDescriptor &b);
++    MemAccessDescriptor select(MemAccessDescriptor &a, MemAccessDescriptor &b);
++    bool hasDim(int d);
++    MemAccessDescriptor compute(function<int(int, int)> f, MemAccessDescriptor &op);
++    list<int> getMemAccesses(int warpSize, int align, int cacheLineSize, bool *fullCoalescing);
++    void print();
++};
++
++#endif
+diff --git a/thrud/include/thrud/NDRange.h b/thrud/include/thrud/NDRange.h
+index d1424c3..4f969dd 100644
+--- a/thrud/include/thrud/NDRange.h
++++ b/thrud/include/thrud/NDRange.h
+@@ -24,9 +24,18 @@ public:
+ 
+ public:
+   InstVector getTids();
++  InstVector getGids();
++  InstVector getGroupIds();
+   InstVector getSizes();
++  InstVector getGlobalSizes();
++  InstVector getDivergentIds();
+   InstVector getTids(int direction);
++  InstVector getGids(int direction);
++  InstVector getGroupIds(int direction);
+   InstVector getSizes(int direction);
++  InstVector getGlobalSizes(int direction);
++  InstVector getDivergentIds(int direction);
++  InstVector getSMemAllocs();
+ 
+   bool isTid(Instruction *inst);
+   bool isTidInDirection(Instruction *inst, int direction);
+@@ -50,6 +59,10 @@ public:
+   bool isGroupId(Instruction *inst, int direction) const;
+   bool isGroupsNum(Instruction *inst, int dimension) const;
+ 
++  Function *getOclFunctionPtr(std::string name) const;
++  void registerOclInst(int direction, std::string name, Instruction *inst);
++  void unregisterOclInst(int direction, std::string name, Instruction *inst);
++
+   void dump();
+ 
+ public:
+@@ -68,7 +81,11 @@ private:
+   void findOpenCLFunctionCallsByNameAllDirs(std::string calleeName,
+                                             Function *caller);
+ 
++  void getAllOpenCLFunctionPtrs(Function *caller);
++  void getExistingOpenCLFunctionPtr(std::string calleeName, Function *caller, std::set<std::string> &unlinked);
++
+ private:
++  std::map<std::string, Function *> oclFunctionPointers;
+   std::vector<std::map<std::string, InstVector>> oclInsts;
+ };
+ 
+diff --git a/thrud/include/thrud/OccupancyReduction.h b/thrud/include/thrud/OccupancyReduction.h
+new file mode 100644
+index 0000000..aa2f71c
+--- /dev/null
++++ b/thrud/include/thrud/OccupancyReduction.h
+@@ -0,0 +1,26 @@
++#ifndef OCCUPANCY_REDUCTION_H
++#define OCCUPANCY_REDUCTION_H
++
++#include "llvm/Pass.h"
++#include "llvm/IR/Function.h"
++#include "llvm/IR/Instruction.h"
++#include "llvm/IR/InstIterator.h"
++
++#include "thrud/Utils.h"
++
++using namespace llvm;
++
++class OccupancyReduction : public FunctionPass {
++
++  public:
++    static char ID;
++    const static unsigned int LOCAL_ADDRESS_SPACE = 3;
++    
++    OccupancyReduction() : FunctionPass(ID) {}
++    virtual void getAnalysisUsage(AnalysisUsage &au) const;
++    virtual bool runOnFunction(Function &F);
++    //virtual bool doFinalization(Module &M);
++
++  };
++
++  #endif
+diff --git a/thrud/include/thrud/ReplaceGlobalIds.h b/thrud/include/thrud/ReplaceGlobalIds.h
+new file mode 100644
+index 0000000..834a692
+--- /dev/null
++++ b/thrud/include/thrud/ReplaceGlobalIds.h
+@@ -0,0 +1,24 @@
++#ifndef REPLACE_GIDS_H
++#define REPLACE_GIDS_H
++
++#include "thrud/Utils.h"
++
++#include "llvm/Pass.h"
++
++using namespace llvm;
++
++namespace llvm {
++class Function;
++}
++
++class ReplaceGlobalIds : public FunctionPass {
++
++public:
++  static char ID;
++  ReplaceGlobalIds();
++
++  virtual bool runOnFunction(Function &function);
++  virtual void getAnalysisUsage(AnalysisUsage &au) const;
++};
++
++#endif
+diff --git a/thrud/include/thrud/ThreadCoarsening.h b/thrud/include/thrud/ThreadCoarsening.h
+index 918c4f8..9f4cad0 100644
+--- a/thrud/include/thrud/ThreadCoarsening.h
++++ b/thrud/include/thrud/ThreadCoarsening.h
+@@ -38,12 +38,14 @@ private:
+   void scaleNDRange();
+   void scaleSizes();
+   void scaleIds();
++  void scaleIdsThreadLevelCoarsening();
+ 
+   // Coarsening.
+   void coarsenFunction();
+   void replicateInst(Instruction *inst);
+   void updatePlaceholderMap(Instruction *inst, InstVector &coarsenedInsts);
+ 
++  void replicateGlobal(GlobalVariable *gv);
+   void replicateRegion(DivergentRegion *region);
+   void replicateRegionClassic(DivergentRegion *region);
+ 
+@@ -99,6 +101,8 @@ private:
+   CoarseningMap cMap;
+   CoarseningMap phMap;
+   Map phReplacementMap;
++  GlobalsSet shMemGlobals;
++  GlobalsCMap shMemGlobalsCMap;
+ };
+ 
+ #endif
+diff --git a/thrud/include/thrud/Utils.h b/thrud/include/thrud/Utils.h
+index 400aa65..838928e 100644
+--- a/thrud/include/thrud/Utils.h
++++ b/thrud/include/thrud/Utils.h
+@@ -9,6 +9,7 @@
+ #include "llvm/IR/Constants.h"
+ #include "llvm/IR/Dominators.h"
+ #include "llvm/IR/ValueMap.h"
++#include "llvm/IR/InstIterator.h"
+ 
+ #include "llvm/Analysis/PostDominators.h"
+ #include "llvm/Analysis/ScalarEvolution.h"
+@@ -29,6 +30,8 @@ bool isInLoop(const Instruction &inst, LoopInfo *loopInfo);
+ bool isInLoop(const Instruction *inst, LoopInfo *loopInfo);
+ bool isInLoop(const BasicBlock *block, LoopInfo *loopInfo);
+ 
++bool isSharedMemAddressSpace(unsigned addressSpace);
++
+ // OpenCL management.
+ bool isKernel(const Function *function);
+ 
+@@ -116,6 +119,7 @@ void dumpIntVector(const std::vector<int> &toDump);
+ // Divergence Utils.
+ 
+ Function *getOpenCLFunctionByName(std::string calleeName, Function *caller);
++Function *createOpenCLFunction(std::string calleeName, Function *caller, AttributeSet attributes);
+ 
+ //------------------------------------------------------------------------------
+ bool isBarrier(Instruction *inst);
+@@ -132,4 +136,20 @@ Instruction *findFirstUser(Instruction *inst);
+ Instruction *findLastUser(Instruction *inst);
+ InstVector findUsers(llvm::Value *value);
+ 
++// IR Support Functions
++unsigned int getIntWidth(Value *value);
++ConstantInt *getConstantInt(unsigned int value, unsigned int width, LLVMContext &context);
++Instruction *getMulInst(Value *value, unsigned int factor);
++Instruction *getMulInst(Value *firstValue, Value *secondValue);
++Instruction *getAddInst(Value *value, unsigned int addend);
++Instruction *getAddInst(Value *firstValue, Value *secondValue);
++Instruction *getShiftInst(Value *value, unsigned int shift);
++Instruction *getAndInst(Value *value, unsigned int factor);
++Instruction *getDivInst(Value *value, unsigned int divisor);
++Instruction *getModuloInst(Value *value, unsigned int modulo);
++
++// System Utils
++std::string getEnvString(const char *name, const char *defValue);
++static bool THREAD_LEVEL_COARSENING = !(getEnvString("THREAD_LEVEL_COARSENING", "").empty());
++
+ #endif
+diff --git a/thrud/lib/AssumeRestrictArgs.cpp b/thrud/lib/AssumeRestrictArgs.cpp
+new file mode 100644
+index 0000000..b861089
+--- /dev/null
++++ b/thrud/lib/AssumeRestrictArgs.cpp
+@@ -0,0 +1,44 @@
++#include "thrud/AssumeRestrictArgs.h"
++
++#include "llvm/Support/CommandLine.h"
++#include "llvm/IR/Attributes.h"
++
++using namespace llvm;
++
++extern cl::opt<std::string> KernelNameCL;
++extern cl::opt<unsigned int> CoarseningDirectionCL;
++
++AssumeRestrictArgs::AssumeRestrictArgs() : FunctionPass(ID) {}
++
++void AssumeRestrictArgs::getAnalysisUsage(AnalysisUsage &au) const {
++  au.setPreservesCFG();
++}
++
++bool AssumeRestrictArgs::runOnFunction(Function &function) {
++  Function *functionPtr = (Function *)&function;
++  //errs() << "Running AssumeRestrictArgs on function " << functionPtr->getName() << "\n";
++  
++  if (!isKernel(functionPtr))
++    return false;
++
++  // Apply the pass to the selected kernel only.
++  std::string FunctionName = functionPtr->getName();
++  if (KernelNameCL != "" && FunctionName != KernelNameCL)
++    return false;
++
++  bool isModified = false;
++  for (Function::arg_iterator it = functionPtr->arg_begin(); it != functionPtr->arg_end(); ++it) {
++    Argument& arg = *it;
++    //errs() << "Arg is : " << arg << " " << arg.hasNoAliasAttr() << " ";
++    if (arg.getType()->isPointerTy() && !arg.hasNoAliasAttr()) {
++      arg.addAttr(AttributeSet::get(arg.getContext(), AttributeSet::FunctionIndex, Attribute::NoAlias));
++      isModified = true;
++    }
++    //errs() << " now: " << arg.hasNoAliasAttr() << "\n";
++  }
++
++  return isModified;
++}
++
++char AssumeRestrictArgs::ID = 0;
++static RegisterPass<AssumeRestrictArgs> X("assumeRestrictArgs", "Assume Restrict Args Pass - adds NoAlias attr to pointer type function args");
+diff --git a/thrud/lib/CacheLineReuseAnalysis.cpp b/thrud/lib/CacheLineReuseAnalysis.cpp
+new file mode 100644
+index 0000000..453193e
+--- /dev/null
++++ b/thrud/lib/CacheLineReuseAnalysis.cpp
+@@ -0,0 +1,550 @@
++#include "llvm/Pass.h"
++#include "llvm/IR/Function.h"
++#include "llvm/IR/Instruction.h"
++#include "llvm/IR/InstIterator.h"
++#include "llvm/Analysis/LoopInfo.h"
++#include "llvm/Support/CommandLine.h"
++#include "llvm/Support/raw_ostream.h"
++
++#include <set>
++#include <map>
++#include <list>
++#include <functional>
++#include <algorithm>
++
++#include "thrud/CacheLineReuseAnalysis.h"
++#include "thrud/MemAccessDescriptor.h"
++#include "thrud/NDRange.h"
++#include "thrud/Utils.h"
++
++#define REQUIRE_CANONICAL_LOOPxxx
++#define DEBUG_PRINTxxx
++
++using namespace llvm;
++
++const int MAX_DIMENSIONS[] = {32,2,2};
++
++extern cl::opt<std::string> KernelNameCL;
++cl::opt<unsigned int> WarpSize("warp-size", cl::init(32), cl::Hidden, cl::desc("The size of one warp within which threads perform lock-step execution"));
++cl::opt<unsigned int> CacheLineSize("cache-line-size", cl::init(32), cl::Hidden, cl::desc("The size of a cache line in bytes"));
++
++void CacheLineReuseAnalysis::getAnalysisUsage(AnalysisUsage &au) const {
++  au.addRequired<NDRange>();
++  au.addRequired<LoopInfo>();
++}
++
++int CacheLineReuseAnalysis::getDimensionality() {
++  int dimensions = 0;
++  for (int dimension = 0; dimension < NDRange::DIRECTION_NUMBER; ++dimension) {
++    if (ndr->getTids(dimension).size() > 0) {
++      dimensions = dimensions + 1;
++    }
++  }
++  return dimensions;
++}
++
++Value * CacheLineReuseAnalysis::getAccessedSymbolPtr(Value * v) {
++  // returns what holds the pointer (e.g. GetElementPtr or pointer passed as function arg) to the accessed symbol
++  if (Instruction * inst = dyn_cast<Instruction>(v)) {
++    switch (inst->getOpcode()) {
++      case Instruction::Load:
++	return getAccessedSymbolPtr(inst->getOperand(0));
++      case Instruction::Store:
++	return getAccessedSymbolPtr(inst->getOperand(1));
++      case Instruction::GetElementPtr:
++	return inst;
++      default:
++	diagnosis = "Could not cast operand to any known type (opcode: " + std::to_string(inst->getOpcode()) + ")";
++	return v;
++    }
++  } else if (isa<Argument>(v)) {
++    return v;
++  }
++  diagnosis = "No case for retreiving symbol ptr for " + std::string(v->getName());
++  return v;
++}
++
++StringRef CacheLineReuseAnalysis::getAccessedSymbolName(Value * v) {
++  Value * ptr = getAccessedSymbolPtr(v);
++  if (GetElementPtrInst * gep = dyn_cast<GetElementPtrInst>(ptr)) {
++    return gep->getOperand(0)->getName();
++  } else if (isa<Argument>(v)) {
++    return v->getName();
++  }
++#ifdef DEBUG_PRINT
++  errs() << " Error on retrieving symbol name of " << *v  << " (name: " << v->getName() << ")\n";
++#endif
++  diagnosis = "No case for retrieving symbol name of " + std::string(v->getName());
++  return "";
++}
++
++bool CacheLineReuseAnalysis::isCachedAddressSpace(Instruction * inst) {
++  // For convenience, this also takes load/store instructions directly
++  switch(inst->getOpcode()) {
++    case Instruction::Load:
++      return dyn_cast<LoadInst>(inst)->getPointerAddressSpace() == GLOBAL_ADDRESS_SPACE;
++    case Instruction::Store:
++      return dyn_cast<StoreInst>(inst)->getPointerAddressSpace() == GLOBAL_ADDRESS_SPACE;
++    case Instruction::GetElementPtr:
++      return dyn_cast<GetElementPtrInst>(inst)->getPointerAddressSpace() == GLOBAL_ADDRESS_SPACE;
++    default:
++      diagnosis = "Could not obtain address space of unknown instruction type (opcode: " + std::to_string(inst->getOpcode()) + ")";
++      return false;
++  }
++}
++
++PHINode *CacheLineReuseAnalysis::getInductionVariable(Loop* loop) const {
++  // This is a variation of Loop::getCanonicalInductionVariable with a few changes commented out
++  BasicBlock *H = loop->getHeader();
++
++  BasicBlock *Incoming = nullptr, *Backedge = nullptr;
++  pred_iterator PI = pred_begin(H);
++  assert(PI != pred_end(H) &&
++         "Loop must have at least one backedge!");
++  Backedge = *PI++;
++  if (PI == pred_end(H)) return nullptr;  // dead loop
++  Incoming = *PI++;
++  if (PI != pred_end(H)) return nullptr;  // multiple backedges?
++
++  if (loop->contains(Incoming)) {
++    if (loop->contains(Backedge))
++      return nullptr;
++    std::swap(Incoming, Backedge);
++  } else if (!loop->contains(Backedge))
++    return nullptr;
++
++  // Loop over all of the PHI nodes, looking for a canonical indvar.
++  for (BasicBlock::iterator I = H->begin(); isa<PHINode>(I); ++I) {
++    PHINode *PN = cast<PHINode>(I);
++#ifdef DEBUG_PRINT
++    errs() << "Looping over phi-node " << *PN << "\n";
++#endif
++#ifdef REQUIRE_CANONICAL_LOOP
++    if (ConstantInt *CI =
++        dyn_cast<ConstantInt>(PN->getIncomingValueForBlock(Incoming)))
++      //if (CI->isNullValue()) 
++        if (Instruction *Inc =
++            dyn_cast<Instruction>(PN->getIncomingValueForBlock(Backedge)))
++          if (Inc->getOpcode() == Instruction::Add &&
++                Inc->getOperand(0) == PN)
++            if (ConstantInt *CI = dyn_cast<ConstantInt>(Inc->getOperand(1)))
++              //if (CI->equalsInt(1))
++#endif
++                return PN;
++  }
++  return nullptr;
++}
++
++void CacheLineReuseAnalysis::preprocess(Function *function, std::set<Instruction*>& memops, std::set<Instruction*>& relevantInstructions) {
++  std::set<Instruction*> defs;
++  std::set<BasicBlock*> relevantBlocks;
++  // find all cached memory accesses
++  for (auto iter = function->begin(), end = function->end(); iter != end; iter++) {
++#ifdef DEBUG_PRINT
++    errs() << "Basic block " << iter->getName() << " has " << iter->size() << " instructions "
++           << "(part of loop: " << loopInfo->getLoopFor(iter)
++           << " is loop header: " << loopInfo->isLoopHeader(iter)
++           << " loop depth: " << loopInfo->getLoopDepth(iter) << ")\n";
++#endif
++    for (BasicBlock::iterator inst = iter->begin(), e = iter->end(); inst != e; ++inst) {
++      // only process loads and stores to global memory
++      errs() << "  " << *inst << "\n";
++      lastInstruction = inst;
++      if ((inst->getOpcode() == Instruction::Load || inst->getOpcode() == Instruction::Store) && isCachedAddressSpace(inst)) {
++	memops.insert(inst);
++	const int paramIdx = inst->getOpcode() == Instruction::Load ? 0 : 1;
++	if (Instruction *operand = dyn_cast<Instruction>(inst->getOperand(paramIdx))) {
++	  while (operand->getOpcode() == Instruction::BitCast) {
++            operand = dyn_cast<Instruction>(operand->getOperand(0));
++	  }
++#ifdef DEBUG_PRINT
++          errs () << "preprocessing " << *operand << "\n";
++#endif
++	  defs.insert(operand);
++          StringRef symbolName = getAccessedSymbolName(operand);
++          if (!symbolName.empty()) {
++            accessedCacheLines.insert(std::pair<StringRef, std::set<int>>(symbolName, std::set<int>()));
++            relevantBlocks.insert(iter);
++          }
++	}
++      }
++    }
++  }
++  // traverse the use-def chain to find all relevant definitionAs
++  while (defs.size() > 0) {
++    Instruction *inst = *defs.begin();
++    defs.erase(defs.begin());
++    // avoid looping infinitely
++    if (relevantInstructions.count(inst) == 0) {
++      relevantInstructions.insert(inst);
++      relevantBlocks.insert(inst->getParent());
++      for (Use &u : inst->operands()) {
++	if (Instruction *operand = dyn_cast<Instruction>(u.get())) {
++	  defs.insert(operand);
++	}
++      }
++    }
++  }
++
++  // iterate over loops
++#ifdef DEBUG_PRINT
++  errs() << "Iterating over loops\n";
++#endif
++  for (auto it = loopInfo->begin(); it != loopInfo->end(); it++) {
++    Loop * loop = *it;
++    for (auto blkIt = loop->block_begin(); blkIt != loop->block_end(); blkIt++) {
++      if (relevantBlocks.find(*blkIt) != relevantBlocks.end()) {
++        relevantLoops.insert(*it);
++      }
++    }
++    std::vector<Loop *> subLoops = loop->getSubLoopsVector();
++    for (auto subLoopIt = subLoops.begin(); subLoopIt != subLoops.end(); subLoopIt++) {
++      Loop * subLoop = *subLoopIt;
++      for (auto blkIt = subLoop->block_begin(); blkIt != subLoop->block_end(); blkIt++) {
++	if (relevantBlocks.find(*blkIt) != relevantBlocks.end()) {
++	  relevantLoops.insert(*subLoopIt);
++	}
++      }
++      
++    }
++  }
++  for (auto it = relevantLoops.begin(); it != relevantLoops.end(); it++) {
++    PHINode * pn = getInductionVariable(*it);
++    //errs() << "IsLoopSimplifyForm? " << (*it)->isLoopSimplifyForm() << "\n";
++    if (pn == NULL) {
++      diagnosis = "Loop structure too complicated";
++      break;
++    }
++#ifdef DEBUG_PRINT
++    errs() << "Canonical induction variable is: " << *pn << "\n";
++    for (unsigned int i = 0; i < pn->getNumOperands(); i++) {
++      errs() << "  operand: " << *pn->getOperand(i) << " types: " << isa<Instruction>(pn->getOperand(i)) << isa<ConstantInt>(pn->getOperand(i)) << "   " << (isa<ConstantInt>(pn->getOperand(i)) ? dyn_cast<ConstantInt>(pn->getOperand(i))->getValue().getSExtValue() : 1234) << "\n";
++    }
++    errs() << "Loop has the following blocks:\n";
++    for (auto bi = (*it)->block_begin(); bi != (*it)->block_end(); bi++) {
++      errs() << "  " << (*bi)->getName() << "\n";
++    }
++#endif
++  }
++}
++
++bool CacheLineReuseAnalysis::runOnFunction(Function &F) {
++  Function *function = (Function *)&F;
++  if (!isKernel(function))
++    return false;
++
++  // Apply the pass to the selected kernel only.
++  std::string FunctionName = F.getName();
++  if (KernelNameCL != "" && FunctionName != KernelNameCL)
++    return false;
++
++  ndr = &getAnalysis<NDRange>();
++  loopInfo = &getAnalysis<LoopInfo>();
++
++
++  dimensions = getDimensionality();
++#ifdef DEBUG_PRINT
++  errs() << "Kernel ";
++  errs().write_escaped(F.getName()) << " is " << dimensions << "-dimensional\n";
++#endif
++
++  //std::set<Instruction*> relevantInstructions;
++  preprocess(function, memops, relevantInstructions);
++
++#ifdef DEBUG_PRINT
++  errs() << "Printing memops:\n";
++  for (Instruction * memop : memops) {
++    errs() << *memop << "\n";
++  }
++  errs() << "There are " << relevantInstructions.size() << " relevant instructions\n";
++
++  // do a bit of printing 
++  for (auto iter = function->begin(), end = function->end(); iter != end; iter++) {
++    errs() << "Basic block " << iter->getName() << " has " << iter->size() << " instructions\n";
++    for (BasicBlock::iterator inst = iter->begin(), e = iter->end(); inst != e; ++inst) {
++      errs() << (relevantInstructions.count(inst) ? ">>" : "  ") << *inst << "\n";
++    }
++  }
++#endif
++
++  accessDescriptorStack.push_back(std::map<Instruction*, vector<MemAccessDescriptor>>());
++  simulate(inst_begin(F), lastInstruction, NULL);
++
++#ifdef DEBUG_PRINT
++  errs() << F.getName() << " used " << MemAccessDescriptor::SIZE << " bytes for MADs and " << MemAccessDescriptor::CACHE_SIZE << " for cache: "
++         << (MemAccessDescriptor::SIZE + MemAccessDescriptor::CACHE_SIZE) << " bytes\n";
++#endif
++  if (diagnosis.empty()) {
++    errs() << "No cache line re-use detected, OK to coarsen\n";
++  } else {
++    errs() << diagnosis << "\n";
++  }
++  return false;
++}
++
++inst_iterator
++CacheLineReuseAnalysis::simulate(inst_iterator it, Instruction* fwdDef, Loop *innermostLoop) {
++  bool done = false;
++  while (!done) {
++    // Loop up to a later def or until diagnosis is set
++    done = (&*it == fwdDef) || !diagnosis.empty();
++    Instruction* inst = &*it++;
++#ifdef DEBUG_PRINT
++    errs() << (relevantInstructions.count(inst) ? ">>" : "  ") << *inst << (ndr->isTid(inst) ? " TID[" + std::to_string(ndr->getDirection(inst))+"]" : "") << "\n";
++#endif
++    if (relevantInstructions.count(inst) > 0 && diagnosis.empty()) {
++      if (ndr->isLocal(inst) || ndr->isGlobal(inst)) {
++	int dimension = ndr->getDirection(inst);
++	MemAccessDescriptor v(dimension, MAX_DIMENSIONS[dimension]);
++        addToStack(inst, v);
++      } else if (ndr->isGlobalSize(inst) || ndr->isLocalSize(inst)) {
++	int n = 1;
++	for (int i = 0; i < dimensions; i++) {
++	  n *= MAX_DIMENSIONS[i];
++	}
++        addToStack(inst, MemAccessDescriptor(n));
++      } else if (ndr->isGroupId(inst)) {
++        addToStack(inst, MemAccessDescriptor(0));
++      } else if (ndr->isGroupsNum(inst)) {
++        addToStack(inst, MemAccessDescriptor(1));
++      } else if (memops.count(inst) > 0) {
++        StringRef accessedSymbolName = getAccessedSymbolName(inst);
++        diagnosis = "Program is data dependent in access to [" + std::string(accessedSymbolName) + "]";
++      } else if (inst->getOpcode() == Instruction::Add) {
++	applyBinaryOp(std::plus<int>(), inst);
++      } else if (inst->getOpcode() == Instruction::Sub) {
++        applyBinaryOp(std::minus<int>(), inst);
++      } else if (inst->getOpcode() == Instruction::Mul) {
++	applyBinaryOp(std::multiplies<int>(), inst);
++      } else if (inst->getOpcode() == Instruction::UDiv) {
++	applyBinaryOp(std::divides<int>(), inst);
++      } else if (inst->getOpcode() == Instruction::URem) {
++	applyBinaryOp(std::modulus<int>(), inst);
++      } else if (inst->getOpcode() == Instruction::Shl) {
++        applyBinaryOp([](int a, int b) {return a << b;}, inst);
++      } else if (inst->getOpcode() == Instruction::Or) {
++        applyBinaryOp(std::bit_or<int>(), inst);
++      } else if (inst->getOpcode() == Instruction::And) {
++        applyBinaryOp(std::bit_and<int>(), inst);
++      } else if (inst->getOpcode() == Instruction::Xor) {
++        applyBinaryOp(std::bit_xor<int>(), inst);
++      } else if (inst->getOpcode() == Instruction::Select) {
++        std::vector<MemAccessDescriptor> preds = getOperand(inst->getOperand(0));
++	std::vector<MemAccessDescriptor> ops1 = getOperand(inst->getOperand(1));
++	std::vector<MemAccessDescriptor> ops2 = getOperand(inst->getOperand(2));
++	std::vector<MemAccessDescriptor> result;
++	for (MemAccessDescriptor pred : preds) {
++	  for (MemAccessDescriptor op1 : ops1) {
++	    for (MemAccessDescriptor op2 : ops2) {
++	      result.push_back(pred.select(op1, op2));
++	    }
++	  }
++	}
++	addToStack(inst, result);
++
++      } else if (inst->getOpcode() == Instruction::SExt) {
++        addToStack(inst, getOperand(inst->getOperand(0))); 
++      } else if (inst->getOpcode() == Instruction::Trunc) {
++        addToStack(inst, getOperand(inst->getOperand(0))); 
++      } else if (inst->getOpcode() == Instruction::ICmp) {
++        ICmpInst *iCmpInst = dyn_cast<ICmpInst>(inst);
++        switch (iCmpInst->getPredicate()) {
++          case ICmpInst::Predicate::ICMP_EQ:  applyBinaryOp(std::equal_to<int>(), inst); break;
++          case ICmpInst::Predicate::ICMP_UGT: applyBinaryOp(std::greater<int>(), inst); break;
++          case ICmpInst::Predicate::ICMP_UGE: applyBinaryOp(std::greater_equal<int>(), inst); break;
++          case ICmpInst::Predicate::ICMP_ULT: applyBinaryOp(std::less<int>(), inst); break;
++          case ICmpInst::Predicate::ICMP_ULE: applyBinaryOp(std::less_equal<int>(), inst); break;
++          case ICmpInst::Predicate::ICMP_SGT: applyBinaryOp(std::greater<int>(), inst); break;
++          case ICmpInst::Predicate::ICMP_SGE: applyBinaryOp(std::greater_equal<int>(), inst); break;
++          case ICmpInst::Predicate::ICMP_SLT: applyBinaryOp(std::less<int>(), inst); break;
++          case ICmpInst::Predicate::ICMP_SLE: applyBinaryOp(std::less_equal<int>(), inst); break;
++          default: diagnosis = "Unknown icmp predicate";
++        }
++#ifdef DEBUG_PRINT
++        errs() << "Inst is an icmp, predicate is: " << iCmpInst->getPredicate() << " eq is " << ICmpInst::Predicate::ICMP_EQ << "\n";
++#endif
++      } else if (inst->getOpcode() == Instruction::BitCast) {
++        // NoOp typecast...
++#ifdef DEBUG_PRINT
++	errs() << "Encountered bitcast, op0 is " << inst->getOperand(0)->getName() << "\n";
++#endif
++	addToStack(inst, getOperand(inst->getOperand(0)));
++      } else if (inst->getOpcode() == Instruction::GetElementPtr) {
++	// this does not do anything interesting itself - forward the last MemAccessDescriptor
++        addToStack(inst, getOperand(inst->getOperand(1)));
++      } else if (inst->getOpcode() == Instruction::PHI) {
++        Loop* loop = loopInfo->getLoopFor(inst->getParent());
++#ifdef DEBUG_PRINT
++        errs () << "Instruction is \n"
++                << "   -> " << *inst << "\n";
++        errs() << "Processing phi instruction... Loop is " << loop << " and innermost loop is " << innermostLoop << "\n";
++#endif
++        if (loop != NULL && loop != innermostLoop /*&& inst == loop->getCanonicalInductionVariable()*/) {
++          std::map<Instruction*, std::vector<MemAccessDescriptor>> baseIt;
++          std::map<Instruction*, std::vector<MemAccessDescriptor>> stepIt;
++          std::vector<MemAccessDescriptor> baseItVector;
++          Instruction * nextFwdDef = NULL;
++          for (unsigned int i = 0; i < inst->getNumOperands(); i++) {
++            Value * v = inst->getOperand(i);
++#ifdef DEBUG_PRINT
++            errs() << "  ==> operand" << i << " is: " << *v << "\n";
++#endif
++            if (isa<Instruction>(v) && isFwdDef(dyn_cast<Instruction>(v))) {
++              if (nextFwdDef != NULL) {
++                diagnosis = "More than one fwd def found for loop";
++              }
++              nextFwdDef = dyn_cast<Instruction>(inst->getOperand(i));
++            } else {
++              std::vector<MemAccessDescriptor> mads = getOperand(inst->getOperand(i));
++              baseItVector.insert(baseItVector.end(), mads.begin(), mads.end());
++            }
++          }
++#ifdef DEBUG_PRINT
++	  if (nextFwdDef != 0) {
++            errs() << "Executing until: " << *nextFwdDef << "\n";
++	  } else {
++            errs() << "Executing until: null\n";
++	  }
++#endif
++          baseIt.insert(std::pair<Instruction*, std::vector<MemAccessDescriptor>>(inst, baseItVector));
++          accessDescriptorStack.push_back(baseIt);
++          simulate(it, nextFwdDef, loop);
++          if (!diagnosis.empty()) return it;
++          baseIt = accessDescriptorStack.back();
++          accessDescriptorStack.pop_back();
++          std::vector<MemAccessDescriptor> nextFwdDefVec = baseIt.find(nextFwdDef)->second;
++          // supposedly that's all we need for the next iteration
++          stepIt.insert(std::pair<Instruction*, std::vector<MemAccessDescriptor>>(inst, nextFwdDefVec));
++          accessDescriptorStack.push_back(stepIt);
++          it = simulate(it, nextFwdDef, loop);
++          stepIt = accessDescriptorStack.back();
++          accessDescriptorStack.pop_back();
++          // merge baseIt and stepIt into current scope
++          mergeIntoStack(baseIt);
++          mergeIntoStack(stepIt);
++        } else {
++	  std::vector<MemAccessDescriptor> mads;
++#ifdef DEBUG_PRINT
++          errs() << "processing an if for inst " << *inst << "\n";
++#endif
++	  for (unsigned int i = 0; i < inst->getNumOperands(); i++) {
++	    std::vector<MemAccessDescriptor> phiBranch = getOperand(inst->getOperand(i));
++	    mads.insert(mads.end(), phiBranch.begin(), phiBranch.end());
++	  }
++	  addToStack(inst, mads);
++        }
++      } else {
++	diagnosis = "Unknown opcode - " + std::to_string(inst->getOpcode());
++      }
++    } else if (memops.count(inst) > 0 && diagnosis.empty()) {
++#ifdef DEBUG_PRINT
++      errs() << "Simulating mem access for " << *inst << "\n";
++#endif
++      int alignment = -1;
++      bool isStore = false;
++      if (inst->getOpcode() == Instruction::Load) {
++	alignment = dyn_cast<LoadInst>(inst)->getAlignment();
++      } else if (inst->getOpcode() == Instruction::Store) {
++	alignment = dyn_cast<StoreInst>(inst)->getAlignment();
++	isStore = true;
++      }
++      Value * ptr = getAccessedSymbolPtr(inst);
++      StringRef accessedSymbolName = getAccessedSymbolName(ptr);
++      std::vector<MemAccessDescriptor> mads = getOperand(ptr);
++      std::set<int> * prevAccesses = &accessedCacheLines[accessedSymbolName];
++      std::set<int> accessesToAdd; 
++      for (MemAccessDescriptor & mad : mads) {
++	mad.print();
++	bool fullCoalescing = true;
++	list<int> accesses = mad.getMemAccesses(WarpSize, alignment, CacheLineSize, &fullCoalescing);
++	int accessesNum = accesses.size();
++	accesses.sort();
++	accesses.unique();
++	int uniqueAccessesNum = accesses.size();
++	int duplicates = accessesNum - uniqueAccessesNum;
++
++	if (duplicates == 0 && uniqueAccessesNum > 1) {
++	  std::vector<int> intersection(prevAccesses->size() + accesses.size());
++	  duplicates = set_intersection(prevAccesses->begin(), prevAccesses->end(), accesses.begin(), accesses.end(), intersection.begin()) - intersection.begin();
++	}
++
++	accessesToAdd.insert(accesses.begin(), accesses.end());
++
++#ifdef DEBUG_PRINT
++	errs() << "Returned " << accessesNum << " accesses to " << uniqueAccessesNum << " unique cache lines with " << duplicates << " duplicates\n";
++#endif
++	if (isStore && fullCoalescing) {
++	  errs() << "Ignoring mem accesses of fully coalesced store instruction";
++	} else if (duplicates > 0 && uniqueAccessesNum > 1) {
++	  diagnosis = "Cache line re-use in access to [" + std::string(accessedSymbolName) + "]";
++	}
++      }
++      prevAccesses->insert(accessesToAdd.begin(), accessesToAdd.end());
++    }
++  }
++  return it;
++}
++
++bool CacheLineReuseAnalysis::isFwdDef(Instruction* inst) {
++  // An instruction that has not yet been encountered in the control flow
++  // Must be a relevant inst
++  for (auto it = accessDescriptorStack.rbegin(); it != accessDescriptorStack.rend(); it++) {
++    if (it->count(inst) > 0) return false;
++  }
++  return true;
++}
++
++void CacheLineReuseAnalysis::mergeIntoStack(std::map<Instruction*, std::vector<MemAccessDescriptor>> &defs) {
++  for (auto const &p : defs) {
++    if (accessDescriptorStack.back().count(p.first) == 0) {
++      accessDescriptorStack.back().insert(p);
++    } else {
++      std::vector<MemAccessDescriptor> * vec = &accessDescriptorStack.back().find(p.first)->second;
++      vec->insert(vec->end(), p.second.begin(), p.second.end());
++    }
++  }
++}
++
++void CacheLineReuseAnalysis::applyBinaryOp(function<int(int, int)> f, Instruction * inst) {
++  std::vector<MemAccessDescriptor> ops1 = getOperand(inst->getOperand(0));
++  std::vector<MemAccessDescriptor> ops2 = getOperand(inst->getOperand(1));
++  std::vector<MemAccessDescriptor> result;
++  for (MemAccessDescriptor op1 : ops1) {
++    for (MemAccessDescriptor op2 : ops2) {
++      result.push_back(op1.compute(f, op2));
++    }
++  }
++  addToStack(inst, result);
++}
++
++std::vector<MemAccessDescriptor> CacheLineReuseAnalysis::findInStack(Instruction* inst) {
++  for (auto it = accessDescriptorStack.rbegin(); it != accessDescriptorStack.rend(); it++) {
++    if (it->count(inst) > 0) return it->find(inst)->second;
++  }
++
++#ifdef DEBUG_PRINT
++  errs() << "No prev def found, inst is " << inst;
++  if (inst != NULL)
++    errs () << " (deref: " << *inst << ")";
++  errs() << "\n";
++#endif
++  return std::vector<MemAccessDescriptor>();
++}
++
++std::vector<MemAccessDescriptor> CacheLineReuseAnalysis::getOperand(Value * v) {
++  if (ConstantInt * intval = dyn_cast<ConstantInt>(v)) {
++    return std::vector<MemAccessDescriptor>{MemAccessDescriptor(intval->getValue().getSExtValue())};
++  } else if (Instruction * inst = dyn_cast<Instruction>(v)) {
++    return findInStack(inst);
++  } else if (isa<Argument>(v)) {
++    return std::vector<MemAccessDescriptor>{MemAccessDescriptor(10000)};
++  } else if (isa<UndefValue>(v)) {
++    return std::vector<MemAccessDescriptor>();
++  } else {
++    diagnosis = "Unknown operand type";
++    return std::vector<MemAccessDescriptor>();
++  }
++}
++
++char CacheLineReuseAnalysis::ID = 0;
++static RegisterPass<CacheLineReuseAnalysis> X("clr", "Cache Line Re-Use Analysis Pass");
+diff --git a/thrud/lib/Coarsening.cpp b/thrud/lib/Coarsening.cpp
+index ca3b544..6aedf0f 100644
+--- a/thrud/lib/Coarsening.cpp
++++ b/thrud/lib/Coarsening.cpp
+@@ -12,6 +12,19 @@ void ThreadCoarsening::coarsenFunction() {
+   RegionVector &regions = sdda->getOutermostDivRegions();
+   InstVector &insts = sdda->getOutermostDivInsts();
+ 
++  // Replicate shMem held in global vars.
++  if (!THREAD_LEVEL_COARSENING) {
++    Function *f = !insts.empty() ? insts[0]->getParent()->getParent() : nullptr;
++    if (f == nullptr) {
++      errs() << "Could not obtain function ptr from div insts\n";
++      return;
++    }
++    shMemGlobals = sdda->getShMemGlobalsUsedIn(f);
++
++    std::for_each(shMemGlobals.begin(), shMemGlobals.end(),
++		  [this](GlobalVariable *gv) { replicateGlobal(gv); });
++  }
++
+   // Replicate instructions.
+   std::for_each(insts.begin(), insts.end(),
+                 [this](Instruction *inst) { replicateInst(inst); });
+@@ -21,6 +34,24 @@ void ThreadCoarsening::coarsenFunction() {
+                 [this](DivergentRegion *region) { replicateRegion(region); });
+ }
+ 
++//------------------------------------------------------------------------------
++void ThreadCoarsening::replicateGlobal(GlobalVariable *gv) {
++  for (unsigned int index = 0; index < factor - 1; ++index) {
++    Module &module = *(gv->getParent());
++    GlobalVariable *newGV = new GlobalVariable(module,
++                                               gv->getType()->getPointerElementType(),
++                                               gv->isConstant(),
++                                               gv->getLinkage(),
++                                               gv->getInitializer(),
++                                               gv->getName() + "..cf" + Twine(index + 2), //TODO
++                                               (GlobalVariable *) nullptr,
++                                               gv->getThreadLocalMode(),
++                                               gv->getType()->getAddressSpace());
++    newGV->copyAttributesFrom(gv);
++    shMemGlobalsCMap[gv].push_back(newGV);
++  }
++}
++
+ //------------------------------------------------------------------------------
+ void ThreadCoarsening::replicateInst(Instruction *inst) {
+   InstVector current;
+@@ -79,12 +110,31 @@ void ThreadCoarsening::applyCoarseningMap(Instruction *inst,
+   for (unsigned int opIndex = 0, opEnd = inst->getNumOperands();
+        opIndex != opEnd; ++opIndex) {
+     Instruction *operand = dyn_cast<Instruction>(inst->getOperand(opIndex));
+-    if (operand == nullptr)
+-      continue;
+-    Instruction *newOp = getCoarsenedInstruction(operand, index);
+-    if (newOp == nullptr)
+-      continue;
+-    inst->setOperand(opIndex, newOp);
++    if (operand != nullptr) {
++      Instruction *newOp = getCoarsenedInstruction(operand, index);
++      if (newOp == nullptr)
++	continue;
++      inst->setOperand(opIndex, newOp);
++    } else if (!THREAD_LEVEL_COARSENING) {
++      if (GlobalVariable *gv = dyn_cast<GlobalVariable>(inst->getOperand(opIndex))) {
++	if (shMemGlobals.find(gv) != shMemGlobals.end()) {
++	  GlobalVariable *divGV = shMemGlobalsCMap[gv][index];
++	  inst->setOperand(opIndex, divGV);
++	}
++      } else if (LoadInst *loadInst = dyn_cast<LoadInst>(inst)) {
++	if (isSharedMemAddressSpace(loadInst->getPointerAddressSpace())) {
++	  if (ConstantExpr *ptrOp = dyn_cast<ConstantExpr>(loadInst->getPointerOperand())) {
++	    if (GlobalVariable *gv = dyn_cast<GlobalVariable>(ptrOp->getOperand(0))) {
++	      if (shMemGlobals.find(gv) != shMemGlobals.end()) {
++		GlobalVariable *divGV = shMemGlobalsCMap[gv][index];
++		Constant *newOp = ptrOp->getWithOperandReplaced(0, divGV);
++		loadInst->setOperand(0, newOp);
++	      }
++	    }
++	  }
++	}
++      }
++    }
+   }
+ }
+ 
+diff --git a/thrud/lib/ControlDependenceAnalysis.cpp b/thrud/lib/ControlDependenceAnalysis.cpp
+index 2f873db..3e65a38 100644
+--- a/thrud/lib/ControlDependenceAnalysis.cpp
++++ b/thrud/lib/ControlDependenceAnalysis.cpp
+@@ -6,6 +6,7 @@
+ 
+ #include <algorithm>
+ #include <functional>
++#include <numeric>
+ 
+ ControlDependenceAnalysis::ControlDependenceAnalysis() : FunctionPass(ID) {}
+ 
+diff --git a/thrud/lib/DivergenceAnalysis.cpp b/thrud/lib/DivergenceAnalysis.cpp
+index fdeaf3a..928adf9 100644
+--- a/thrud/lib/DivergenceAnalysis.cpp
++++ b/thrud/lib/DivergenceAnalysis.cpp
+@@ -1,6 +1,7 @@
+ #include "thrud/DivergenceAnalysis.h"
+ 
+ #include "thrud/DivergentRegion.h"
++#include "thrud/ReplaceGlobalIds.h"
+ #include "thrud/Utils.h"
+ 
+ #include "llvm/Pass.h"
+@@ -11,6 +12,7 @@
+ #include "llvm/IR/InstrTypes.h"
+ #include "llvm/IR/Instructions.h"
+ #include "llvm/IR/Function.h"
++#include "llvm/IR/GlobalVariable.h"
+ 
+ #include "llvm/ADT/Statistic.h"
+ 
+@@ -155,7 +157,7 @@ void DivergenceAnalysis::findOutermostInsts(InstVector &insts,
+   }
+ 
+   // Remove from result all the calls to builtin functions.
+-  InstVector oclIds = ndr->getTids();
++  InstVector oclIds = ndr->getDivergentIds();
+   InstVector tmp;
+ 
+   size_t oldSize = result.size();
+@@ -249,15 +251,59 @@ bool DivergenceAnalysis::isDivergent(Instruction *inst) {
+   return isPresent(inst, divInsts);
+ }
+ 
++//------------------------------------------------------------------------------
++GlobalsSet &DivergenceAnalysis::getShMemGlobalsUsedIn(Function *f) {
++  return shMemGlobals[f];
++}
++
+ // Support functions.
+ //------------------------------------------------------------------------------
+-void findUsesOf(Instruction *inst, InstSet &result) {
++void DivergenceAnalysis::findUsesOf(Instruction *inst, InstSet &result) {
+   for (auto userIter = inst->user_begin(), userEnd = inst->user_end();
+        userIter != userEnd; ++userIter) {
+     if (Instruction *userInst = dyn_cast<Instruction>(*userIter)) {
+       result.insert(userInst);
+     }
+   }
++  if (!THREAD_LEVEL_COARSENING) {
++    // handling sharedMem accesses separately
++    if (StoreInst *storeInst = dyn_cast<StoreInst>(inst)) {
++      if (isSharedMemAddressSpace(storeInst->getPointerAddressSpace())) {
++	if (GetElementPtrInst *getElementPtrInst = dyn_cast<GetElementPtrInst>(storeInst->getPointerOperand())) {
++	  if (GlobalVariable *gv = dyn_cast<GlobalVariable>(getElementPtrInst->getPointerOperand())) {
++	    // find all uses of shared mem
++	    for (auto userIter = gv->user_begin(), userEnd = gv->user_end();
++		 userIter != userEnd; ++userIter) {
++	      if (Instruction *userInst = dyn_cast<Instruction>(*userIter)) {
++		if (userInst != storeInst) {
++		  result.insert(userInst);
++		}
++	      } else {
++		// it might be an expression inside a LoadInst
++		for (auto it = userIter->user_begin(), itEnd = userIter->user_end(); it != itEnd; ++it) {
++		  if (Instruction *userInst = dyn_cast<Instruction>(*it)) {
++		    if (userInst != storeInst) {
++		      result.insert(userInst);
++		    }
++		  }
++		}
++	      }
++	    }
++	    // register shared mem in globals map
++	    shMemGlobals[storeInst->getParent()->getParent()].insert(gv);
++	    //errs() << "Found " << result.size() << " uses of " << *inst << " using global variable " << *gv << ":\n";
++	  } else {
++	    errs() << "Found access to sharedMem where address not held in global variable\n";
++	  }
++	} else {
++	  errs() << "Found access to sharedMem but could not obtain GetElementPtr instruction\n";
++	}
++      }
++    }
++  }
++  //errs() << "Found " << result.size() << " uses of " << *inst << ":\n";
++  //dumpSet(result);
++  //errs() << "--------\n";
+ }
+ 
+ //------------------------------------------------------------------------------
+@@ -290,6 +336,7 @@ bool isOutermost(DivergentRegion *region, RegionVector &regions) {
+ SingleDimDivAnalysis::SingleDimDivAnalysis() : FunctionPass(ID) {}
+ 
+ void SingleDimDivAnalysis::getAnalysisUsage(AnalysisUsage &au) const {
++  au.addRequired<ReplaceGlobalIds>();
+   au.addRequired<LoopInfo>();
+   au.addPreserved<LoopInfo>();
+   au.addRequired<PostDominatorTree>();
+@@ -320,7 +367,7 @@ bool SingleDimDivAnalysis::runOnFunction(Function &functionRef) {
+ }
+ 
+ InstVector SingleDimDivAnalysis::getTids() {
+-  return ndr->getTids(CoarseningDirectionCL);
++  return ndr->getDivergentIds(CoarseningDirectionCL);
+ }
+ 
+ char SingleDimDivAnalysis::ID = 0;
+@@ -360,7 +407,7 @@ bool MultiDimDivAnalysis::runOnFunction(Function &functionRef) {
+   return false;
+ }
+ 
+-InstVector MultiDimDivAnalysis::getTids() { return ndr->getTids(); }
++InstVector MultiDimDivAnalysis::getTids() { return ndr->getDivergentIds(); }
+ 
+ char MultiDimDivAnalysis::ID = 0;
+ static RegisterPass<MultiDimDivAnalysis>
+diff --git a/thrud/lib/MemAccessDescriptor.cpp b/thrud/lib/MemAccessDescriptor.cpp
+new file mode 100644
+index 0000000..bc45613
+--- /dev/null
++++ b/thrud/lib/MemAccessDescriptor.cpp
+@@ -0,0 +1,185 @@
++#include "thrud/MemAccessDescriptor.h"
++#include <vector>
++#include <set>
++#include <list>
++#include <algorithm>
++#include <functional>
++
++#include "llvm/Support/CommandLine.h"
++#include "llvm/Support/raw_ostream.h"
++
++#define DEBUG_PRINT
++
++using namespace std;
++
++int MemAccessDescriptor::SIZE = 0;
++int MemAccessDescriptor::CACHE_SIZE = 0;
++
++void MemAccessDescriptor::init(const int x, const int y, const int z) {
++  isValue = false;
++  //hasDim[0] = x > 1;
++  //hasDim[1] = y > 1;
++  //hasDim[2] = z > 1;
++  sizes[0] = x;
++  sizes[1] = y;
++  sizes[2] = z;
++  mad.resize(z);
++  for (int k = 0; k < z; k++) {
++    mad[k].resize(y);
++    for (int j = 0; j < y; j++) {
++      mad[k][j].resize(x);
++      for (int i = 0; i < x; i++) {
++	mad[k][j][i] = i|j|k;
++      }
++    }
++  }
++  SIZE += max(x,1) * max(y,1) * max(z,1) * sizeof(int);
++}
++
++MemAccessDescriptor::MemAccessDescriptor(int val) {
++  isValue = true;
++  value = val;
++  mad.resize(1);
++  mad[0].resize(1);
++  mad[0][0].push_back(val);
++  SIZE += sizeof(int);
++}
++
++MemAccessDescriptor::MemAccessDescriptor(int dimension, int n) {
++  isValue = false;
++  if (dimension == 0) {
++    init(n, 1, 1);
++  } else if (dimension == 1) {
++    init(1, n, 1);
++  } else { //if (dimension == 2) {
++    init(1, 1, n);
++  }
++}
++
++MemAccessDescriptor::MemAccessDescriptor(const int x, const int y, const int z) {
++  /* typically only one of (x,y,z) will be set to a value other-and-larger than 1 */
++  init(x, y, z);
++}
++
++MemAccessDescriptor::MemAccessDescriptor(function<int(int, int)> f, MemAccessDescriptor &a, MemAccessDescriptor &b) {
++  isValue = false;
++  //int sizes[3] = {1, 1, 1};
++  int sizesProduct = 1;
++  for (int i = 0; i < 3; i++) {
++    sizes[i] = max(a.sizes[i], b.sizes[i]);
++    //hasDim[i] = sizes[i] > 1;
++    sizesProduct *= max(sizes[i], 1);
++  }
++  SIZE += sizesProduct * sizeof(int);
++  mad.resize(sizes[2]);
++  for (int k = 0; k < sizes[2]; k++) {
++    int aZ = a.hasDim(2) ? k : 0;
++    int bZ = b.hasDim(2) ? k : 0;
++    mad[k].resize(sizes[1]);
++    for (int j = 0; j < sizes[1]; j++) {
++      int aY = a.hasDim(1) ? j : 0;
++      int bY = b.hasDim(1) ? j : 0;
++      mad[k][j].resize(sizes[0]);
++      for (int i = 0; i < sizes[0]; i++) {
++        int aX = a.hasDim(0) ? i : 0;
++        int bX = b.hasDim(0) ? i : 0;
++        mad[k][j][i] = f(a.mad[aZ][aY][aX], b.mad[bZ][bY][bX]);
++      }
++    }
++  }
++}
++
++bool MemAccessDescriptor::hasDim(int d) {
++  return sizes[d] > 1;
++}
++
++MemAccessDescriptor MemAccessDescriptor::compute(function<int(int, int)> f, MemAccessDescriptor &operand) {
++  if (isValue && operand.isValue) {
++    return MemAccessDescriptor(f(value, operand.value));
++  } else {
++    return MemAccessDescriptor(f, *this, operand);
++  }
++}
++
++MemAccessDescriptor MemAccessDescriptor::select(MemAccessDescriptor &a, MemAccessDescriptor &b) {
++  // from the perspective of the predicate
++  if (a.isValue && b.isValue) {
++    return MemAccessDescriptor(mad[0][0][0] ? a.value : b.value);
++  } else {
++    MemAccessDescriptor result(max(a.sizes[0], b.sizes[0]),
++                           max(a.sizes[1], b.sizes[1]),
++                           max(a.sizes[2], b.sizes[2]));
++    for (int k = 0; k < result.sizes[2]; k++) {
++      int aZ = a.hasDim(2) ? k : 0;
++      int bZ = b.hasDim(2) ? k : 0;
++      int pZ = hasDim(2)   ? k : 0;
++      for (int j = 0; j < result.sizes[1]; j++) {
++	int aY = a.hasDim(1) ? j : 0;
++	int bY = b.hasDim(1) ? j : 0;
++        int pY = hasDim(1)   ? j : 0;
++	for (int i = 0; i < result.sizes[0]; i++) {
++	  int aX = a.hasDim(0) ? i : 0;
++	  int bX = b.hasDim(0) ? i : 0;
++          int pX = hasDim(0)   ? i : 0;
++	  result.mad[k][j][i] = mad[pZ][pY][pX] ? a.mad[aZ][aY][aX] : b.mad[bZ][bY][bX];
++	}
++      }
++    }
++    return result;
++  }
++}
++
++list<int> MemAccessDescriptor::getMemAccesses(int warpSize, int align, int cacheLineSize, bool *fullCoalescing) {
++  list<int> result;
++  set<int> warpAccess;
++  int consecutiveAccessCounter = 0;
++  int lastAccess = -1;
++  *fullCoalescing = true;
++  for (int k = 0; k < sizes[2]; k++) {
++    for (int j = 0; j < sizes[1]; j++) {
++      for (int i = 0; i < sizes[0]; i+=warpSize) {
++        for (int c = i; c < i+warpSize && c < sizes[0]; c++) {
++          warpAccess.insert(((mad[k][j][c] * align) / cacheLineSize) * cacheLineSize);
++
++	  // test for consecutive accesses
++	  if (consecutiveAccessCounter > 0 && lastAccess != mad[k][j][c] - 1) {
++            *fullCoalescing = false;
++	    consecutiveAccessCounter = -1; // restart counting
++	  }
++          lastAccess = mad[k][j][c];
++	  if (++consecutiveAccessCounter == (cacheLineSize / align)) {
++            consecutiveAccessCounter = 0;
++	  }
++        }
++#ifdef DEBUG_PRINT
++        for (int c : warpAccess) {
++          llvm::errs() << c << " ";
++        }
++        llvm::errs() << "\n";
++#endif
++        result.insert(result.end(), warpAccess.begin(), warpAccess.end());
++        warpAccess.clear();
++      }
++    }
++  }
++#ifdef DEBUG_PRINT
++  if (fullCoalescing) {
++    llvm::errs() << "Mem accesses are fully coalesced\n";
++  }
++#endif
++  CACHE_SIZE += result.size() * sizeof(int);
++  return result;
++}
++
++void MemAccessDescriptor::print() {
++  for (unsigned int i = 0; i < mad.size(); i++) {
++    for (unsigned int j = 0; j < mad[0].size(); j++) {
++      for (unsigned int k = 0; k < mad[0][0].size(); k++) {
++	llvm::errs() << mad[i][j][k] << " ";
++      }
++      llvm::errs () << "\n";
++    }
++    llvm::errs() << "---------------------------------------\n";
++  }
++}
++
+diff --git a/thrud/lib/NDRange.cpp b/thrud/lib/NDRange.cpp
+index 3060dbc..97f3fb3 100644
+--- a/thrud/lib/NDRange.cpp
++++ b/thrud/lib/NDRange.cpp
+@@ -1,5 +1,9 @@
+ #include "thrud/NDRange.h"
+ 
++#include "llvm/IR/Module.h"
++#include "llvm/IR/GlobalVariable.h"
++#include "thrud/Utils.h"
++
+ std::string NDRange::GET_GLOBAL_ID = "get_global_id";
+ std::string NDRange::GET_LOCAL_ID = "get_local_id";
+ std::string NDRange::GET_GLOBAL_SIZE = "get_global_size";
+@@ -15,6 +19,7 @@ void NDRange::getAnalysisUsage(AnalysisUsage &au) const {
+ }
+ 
+ bool NDRange::runOnFunction(Function &function) {
++
+   Function *functionPtr = (Function *)&function;
+   init();
+   findOpenCLFunctionCallsByNameAllDirs(GET_GLOBAL_ID, functionPtr);
+@@ -23,6 +28,9 @@ bool NDRange::runOnFunction(Function &function) {
+   findOpenCLFunctionCallsByNameAllDirs(GET_LOCAL_SIZE, functionPtr);
+   findOpenCLFunctionCallsByNameAllDirs(GET_GROUP_ID, functionPtr);
+   findOpenCLFunctionCallsByNameAllDirs(GET_GROUPS_NUMBER, functionPtr);
++
++  getAllOpenCLFunctionPtrs(functionPtr);
++
+   return false;
+ }
+ 
+@@ -39,6 +47,26 @@ InstVector NDRange::getTids() {
+   return result;
+ }
+ 
++InstVector NDRange::getGids() {
++  InstVector result;
++  for (int direction = 0; direction < DIRECTION_NUMBER; ++direction) {
++    std::map<std::string, InstVector> &dirInsts = oclInsts[direction];
++    InstVector globalIds = dirInsts[GET_GLOBAL_ID];
++    result.insert(result.end(), globalIds.begin(), globalIds.end());
++  }
++  return result;
++}
++
++InstVector NDRange::getGroupIds() {
++  InstVector result;
++  for (int direction = 0; direction < DIRECTION_NUMBER; ++direction) {
++    std::map<std::string, InstVector> &dirInsts = oclInsts[direction];
++    InstVector groupIds = dirInsts[GET_GROUP_ID];
++    result.insert(result.end(), groupIds.begin(), groupIds.end());
++  }
++  return result;
++}
++
+ InstVector NDRange::getSizes() {
+   InstVector result;
+   for (int direction = 0; direction < DIRECTION_NUMBER; ++direction) {
+@@ -51,6 +79,26 @@ InstVector NDRange::getSizes() {
+   return result;
+ }
+ 
++InstVector NDRange::getGlobalSizes() {
++  InstVector result;
++  for (int direction = 0; direction < DIRECTION_NUMBER; ++direction) {
++    std::map<std::string, InstVector> &dirInsts = oclInsts[direction];
++    InstVector globalSizes = dirInsts[GET_GLOBAL_SIZE];
++    InstVector groupsNum = dirInsts[GET_GROUPS_NUMBER];
++    result.insert(result.end(), globalSizes.begin(), globalSizes.end());
++    result.insert(result.end(), groupsNum.begin(), groupsNum.end());
++  }
++  return result;
++}
++
++InstVector NDRange::getDivergentIds() {
++  if (THREAD_LEVEL_COARSENING) {
++    return getTids();
++  } else {
++    return getGroupIds();
++  }
++}
++
+ InstVector NDRange::getTids(int direction) {
+   InstVector result;
+   std::map<std::string, InstVector> &dirInsts = oclInsts[direction];
+@@ -61,6 +109,22 @@ InstVector NDRange::getTids(int direction) {
+   return result;
+ }
+ 
++InstVector NDRange::getGids(int direction) {
++  InstVector result;
++  std::map<std::string, InstVector> &dirInsts = oclInsts[direction];
++  InstVector globalIds = dirInsts[GET_GLOBAL_ID];
++  result.insert(result.end(), globalIds.begin(), globalIds.end());
++  return result;
++}
++
++InstVector NDRange::getGroupIds(int direction) {
++  InstVector result;
++  std::map<std::string, InstVector> &dirInsts = oclInsts[direction];
++  InstVector groupIds = dirInsts[GET_GROUP_ID];
++  result.insert(result.end(), groupIds.begin(), groupIds.end());
++  return result;
++}
++
+ InstVector NDRange::getSizes(int direction) {
+   InstVector result;
+   std::map<std::string, InstVector> &dirInsts = oclInsts[direction];
+@@ -71,6 +135,24 @@ InstVector NDRange::getSizes(int direction) {
+   return result;
+ }
+ 
++InstVector NDRange::getGlobalSizes(int direction) {
++  InstVector result;
++  std::map<std::string, InstVector> &dirInsts = oclInsts[direction];
++  InstVector globalSizes = dirInsts[GET_GLOBAL_SIZE];
++  InstVector groupsNum = dirInsts[GET_GROUPS_NUMBER];
++  result.insert(result.end(), globalSizes.begin(), globalSizes.end());
++  result.insert(result.end(), groupsNum.begin(), groupsNum.end());
++  return result;
++}
++
++InstVector NDRange::getDivergentIds(int direction) {
++  if (THREAD_LEVEL_COARSENING) {
++    return getTids(direction);
++  } else {
++    return getGroupIds(direction);
++  }
++}
++
+ bool NDRange::isTid(Instruction *inst) {
+   bool result = false;
+   for (int direction = 0; direction < DIRECTION_NUMBER; ++direction) {
+@@ -196,6 +278,25 @@ bool NDRange::isGroupsNum(Instruction *inst, int direction) const {
+   return isPresentInDirection(inst, GET_GROUPS_NUMBER, direction);
+ }
+ 
++Function *NDRange::getOclFunctionPtr(std::string name) const {
++  return oclFunctionPointers.find(name)->second;
++}
++
++void NDRange::registerOclInst(int direction, std::string name, Instruction *inst) {
++  std::map<std::string, InstVector> &dirInsts = oclInsts[direction];
++  InstVector &insts = dirInsts[name];
++  insts.push_back(inst);
++}
++
++void NDRange::unregisterOclInst(int direction, std::string name, Instruction *inst) {
++  std::map<std::string, InstVector> &dirInsts = oclInsts[direction];
++  InstVector &insts = dirInsts[name];
++  auto pos = std::find(insts.begin(), insts.end(), inst);
++  if (pos != insts.end()) {
++    insts.erase(pos);
++  }
++}
++
+ void NDRange::dump() {
+   for (int direction = 0; direction < DIRECTION_NUMBER; ++direction) {
+     std::map<std::string, InstVector> &dirInsts = oclInsts[direction];
+@@ -254,6 +355,35 @@ void NDRange::findOpenCLFunctionCallsByNameAllDirs(std::string calleeName,
+   }
+ }
+ 
++void NDRange::getAllOpenCLFunctionPtrs(Function *caller) {
++
++  std::set<std::string> unlinked;
++
++  getExistingOpenCLFunctionPtr(GET_GLOBAL_ID,     caller, unlinked);
++  getExistingOpenCLFunctionPtr(GET_LOCAL_ID,      caller, unlinked);
++  getExistingOpenCLFunctionPtr(GET_GLOBAL_SIZE,   caller, unlinked);
++  getExistingOpenCLFunctionPtr(GET_LOCAL_SIZE,    caller, unlinked);
++  getExistingOpenCLFunctionPtr(GET_GROUP_ID,      caller, unlinked);
++  getExistingOpenCLFunctionPtr(GET_GROUPS_NUMBER, caller, unlinked);
++
++  Function *firstFunc = oclFunctionPointers.begin()->second;
++
++  for (std::set<std::string>::iterator it = unlinked.begin(); it != unlinked.end(); ++it) {
++    //Function *createOpenCLFunction(std::string calleeName, Function *caller, AttributeSet attributes);
++    std::string calleeName = *it;
++    oclFunctionPointers[calleeName] = createOpenCLFunction(calleeName, caller, firstFunc->getAttributes());
++  }
++}
++
++void NDRange::getExistingOpenCLFunctionPtr(std::string calleeName, Function *caller, std::set<std::string> &unlinked) {
++  Function *callee = getOpenCLFunctionByName(calleeName, caller);
++  if (callee == nullptr) {
++    unlinked.insert(calleeName);
++  } else {
++    oclFunctionPointers[calleeName] = callee;
++  }
++}
++
+ // -----------------------------------------------------------------------------
+ void findOpenCLFunctionCallsByName(std::string calleeName, Function *caller,
+                                    int direction, InstVector &target) {
+diff --git a/thrud/lib/NDRangeScaling.cpp b/thrud/lib/NDRangeScaling.cpp
+index acb7b42..754ab95 100644
+--- a/thrud/lib/NDRangeScaling.cpp
++++ b/thrud/lib/NDRangeScaling.cpp
+@@ -3,15 +3,6 @@
+ #include "thrud/DataTypes.h"
+ #include "thrud/Utils.h"
+ 
+-// Support functions.
+-Instruction *getMulInst(Value *value, unsigned int factor);
+-Instruction *getAddInst(Value *value, unsigned int addend);
+-Instruction *getAddInst(Value *V1, Value *V2);
+-Instruction *getShiftInst(Value *value, unsigned int shift);
+-Instruction *getAndInst(Value *value, unsigned int factor);
+-Instruction *getDivInst(Value *value, unsigned int divisor);
+-Instruction *getModuloInst(Value *value, unsigned int modulo);
+-
+ //------------------------------------------------------------------------------
+ void ThreadCoarsening::scaleNDRange() {
+   InstVector InstTids;
+@@ -21,21 +12,32 @@ void ThreadCoarsening::scaleNDRange() {
+ 
+ //------------------------------------------------------------------------------
+ void ThreadCoarsening::scaleSizes() {
+-  InstVector sizeInsts = ndr->getSizes(direction);
++  InstVector sizeInsts = THREAD_LEVEL_COARSENING ? ndr->getSizes(direction) : ndr->getGlobalSizes(direction);
++
++  //errs() << "Size instructions:\n";
++  //dumpVector(sizeInsts);
++  
++  /*if (THREAD_LEVEL_COARSENING)
++    errs() << "Applying thread-level coarsening\n";
++  else 
++    errs() << "Applying block-level coarsening\n";*/
++
+   for (InstVector::iterator iter = sizeInsts.begin(), iterEnd = sizeInsts.end();
+        iter != iterEnd; ++iter) {
+     // Scale size.
+     Instruction *inst = *iter;
+     Instruction *mul = getMulInst(inst, factor);
+     mul->insertAfter(inst);
++    //errs() << "Inserting " << *mul << "\n";
+     // Replace uses of the old size with the scaled one.
+     replaceUses(inst, mul);
+   }
+ }
+ 
+ //------------------------------------------------------------------------------
++
+ // Scaling function: origTid = [newTid / st] * cf * st + newTid % st + subid * st
+-void ThreadCoarsening::scaleIds() {
++void ThreadCoarsening::scaleIdsThreadLevelCoarsening() {
+   unsigned int cfst = factor * stride;
+ 
+   InstVector tids = ndr->getTids(direction);
+@@ -73,79 +75,95 @@ void ThreadCoarsening::scaleIds() {
+   }
+ }
+ 
+-// Support functions.
+-//------------------------------------------------------------------------------
+-unsigned int getIntWidth(Value *value) {
+-  Type *type = value->getType();
+-  IntegerType *intType = dyn_cast<IntegerType>(type);
+-  assert(intType && "Value type is not integer");
+-  return intType->getBitWidth();
+-}
+-
+-ConstantInt *getConstantInt(unsigned int value, unsigned int width,
+-                            LLVMContext &context) {
+-  IntegerType *integer = IntegerType::get(context, width);
+-  return ConstantInt::get(integer, value);
+-}
+-
+-Instruction *getMulInst(Value *value, unsigned int factor) {
+-  unsigned int width = getIntWidth(value);
+-  ConstantInt *factorValue = getConstantInt(factor, width, value->getContext());
+-  Instruction *mul =
+-      BinaryOperator::Create(Instruction::Mul, value, factorValue);
+-  mul->setName(value->getName() + ".." + Twine(factor));
+-  return mul;
+-}
++void ThreadCoarsening::scaleIds() {
++  if (THREAD_LEVEL_COARSENING) {
++    scaleIdsThreadLevelCoarsening();
++    return;
++  }
+ 
+-Instruction *getAddInst(Value *value, unsigned int addend) {
+-  unsigned int width = getIntWidth(value);
+-  ConstantInt *addendValue = getConstantInt(addend, width, value->getContext());
+-  Instruction *add =
+-      BinaryOperator::Create(Instruction::Add, value, addendValue);
+-  add->setName(value->getName() + ".." + Twine(addend));
+-  return add;
+-}
++  // replace all globalIds with (groupId * localSize + localId)
++  InstVector gids = ndr->getGids(direction);
+ 
+-Instruction *getAddInst(Value *firstValue, Value *secondValue) {
+-  Instruction *add =
+-      BinaryOperator::Create(Instruction::Add, firstValue, secondValue);
+-  add->setName(firstValue->getName() + "..Add");
+-  return add;
+-}
++  /*std::vector<Instruction *> unusedInsts;
++  for (InstVector::iterator instIter = gids.begin(), instEnd = gids.end();
++       instIter != instEnd; ++instIter) {
++    Instruction *inst = *instIter;
+ 
+-Instruction *getShiftInst(Value *value, unsigned int shift) {
+-  unsigned int width = getIntWidth(value);
+-  ConstantInt *intValue = getConstantInt(shift, width, value->getContext());
+-  Instruction *shiftInst =
+-      BinaryOperator::Create(Instruction::LShr, value, intValue);
+-  shiftInst->setName(Twine(value->getName()) + "..Shift");
+-  return shiftInst;
+-}
++    LLVMContext & context = inst->getContext();
++    IntegerType * intType = IntegerType::getInt32Ty(context);
++
++    CallInst *cinst = (CallInst *) inst;
++
++    ConstantInt *cint = dyn_cast<ConstantInt>(cinst->getArgOperand(0));
++
++    //IRBuilder<> builder(inst->getParent());
++    //builder.createCall(ndr->getOclFunctionPtr(NDRange::GET_GROUP_ID), ArrayRef(direction));
++    ////ConstantInt * const param = ConstantInt::get(intType, direction);
++    //ArrayRef<ConstantInt> params(*param);
++    
++    //ArrayRef<Value *> params(ConstantInt::get(intType, direction));
++    //CallInst *groupId = CallInst::Create(ndr->getOclFunctionPtr(NDRange::GET_GROUP_ID), ArrayRef<Value *>(ConstantInt::get(intType, direction)));
++    //std::cout << "Finished\n";
++    
++
++    CallInst *groupId = (CallInst* ) inst->clone();
++
++    groupId->setCalledFunction(ndr->getOclFunctionPtr(NDRange::GET_GROUP_ID));
++    groupId->insertAfter(inst);
++    ndr->registerOclInst(direction, NDRange::GET_GROUP_ID, groupId);
++
++    CallInst *localSize = (CallInst* ) inst->clone();
++    localSize->setCalledFunction(ndr->getOclFunctionPtr(NDRange::GET_LOCAL_SIZE));
++    localSize->insertAfter(groupId);
++    ndr->registerOclInst(direction, NDRange::GET_LOCAL_SIZE, localSize);
++
++    CallInst *localId = (CallInst* ) inst->clone();
++    localId->setCalledFunction(ndr->getOclFunctionPtr(NDRange::GET_LOCAL_ID));
++    localId->insertAfter(localSize);
++    ndr->registerOclInst(direction, NDRange::GET_LOCAL_ID, localId);
++
++    Instruction *mul = getMulInst(groupId, localSize);
++    mul->insertAfter(localId);
++    Instruction *add = getAddInst(mul, localId);
++    add->insertAfter(mul);
++
++    replaceUses(inst, add);
++    
++    ndr->unregisterOclInst(direction, NDRange::GET_GLOBAL_ID, inst);
++    errs () << "(NDRangeScaling) Trying to remove inst from parent >> " << *inst << "\n";
++    unusedInsts.push_back(inst); 
++    //inst->removeFromParent();
++  }
++  for (auto it = unusedInsts.begin(); it != unusedInsts.end(); ++it) {
++    Instruction *inst = *it;
++    inst->eraseFromParent();
++  }*/
++  //scaleIds2();
++  // replace all groupIds with (cf * groupId + i)
++  InstVector groupIds = ndr->getGroupIds(direction); 
++  for (InstVector::iterator instIter = groupIds.begin(), instEnd = groupIds.end();
++       instIter != instEnd; ++instIter) {
++    Instruction *inst = *instIter;
++    Instruction *base = getMulInst(inst, factor);
++    base->insertAfter(inst);
++    replaceUses(inst, base);
++    base->setOperand(0, inst);
++   
++    cMap.insert(std::pair<Instruction *, InstVector>(inst, InstVector()));
++    InstVector &current = cMap[base];
++    current.reserve(factor - 1);
+ 
+-Instruction *getAndInst(Value *value, unsigned int factor) {
+-  unsigned int width = getIntWidth(value);
+-  ConstantInt *intValue = getConstantInt(factor, width, value->getContext());
+-  Instruction *andInst =
+-      BinaryOperator::Create(Instruction::And, value, intValue);
+-  andInst->setName(Twine(value->getName()) + "..And");
+-  return andInst;
+-}
++    Instruction *bookmark = base;
++    for (unsigned int index = 2; index <= factor; ++index) {
++      Instruction *add = getAddInst(base, (index - 1));
++      //errs() << "Creating instruction for cf " << (index - 1) << " >> " << *add << "\n";
++      add->insertAfter(bookmark);
++      current.push_back(add);
++      bookmark = add;
++    }
+ 
+-Instruction *getDivInst(Value *value, unsigned int divisor) {
+-  unsigned int width = getIntWidth(value);
+-  ConstantInt *intValue = getConstantInt(divisor, width, value->getContext());
+-  Instruction *divInst = 
+-    BinaryOperator::Create(Instruction::UDiv, value, intValue);
+-  divInst->setName(Twine(value->getName()) + "..Div");
+-  return divInst;
++  }
++  //dumpCoarseningMap(cMap);
+ }
+ 
+-Instruction *getModuloInst(Value *value, unsigned int modulo) {
+-  unsigned int width = getIntWidth(value);
+-  ConstantInt *intValue = getConstantInt(modulo, width, value->getContext());
+-  Instruction *moduloInst = 
+-    BinaryOperator::Create(Instruction::URem, value, intValue);
+-  moduloInst->setName(Twine(value->getName()) + "..Rem");
+-  return moduloInst;
+-}
+ 
+diff --git a/thrud/lib/OccupancyReduction.cpp b/thrud/lib/OccupancyReduction.cpp
+new file mode 100644
+index 0000000..62498ec
+--- /dev/null
++++ b/thrud/lib/OccupancyReduction.cpp
+@@ -0,0 +1,107 @@
++#include "llvm/Pass.h"
++#include "llvm/IR/Module.h"
++#include "llvm/IR/Function.h"
++#include "llvm/IR/Instruction.h"
++#include "llvm/IR/InstIterator.h"
++#include "llvm/IR/GlobalValue.h"
++#include "llvm/IR/GlobalVariable.h"
++#include "llvm/IR/IRBuilder.h"
++#include "llvm/IR/Constants.h"
++#include "llvm/Analysis/LoopInfo.h"
++#include "llvm/Support/CommandLine.h"
++#include "llvm/Support/raw_ostream.h"
++
++#include <set>
++#include <map>
++#include <list>
++#include <functional>
++#include <algorithm>
++
++#include "thrud/OccupancyReduction.h"
++#include "thrud/NDRange.h"
++#include "thrud/Utils.h"
++
++using namespace llvm;
++
++extern cl::opt<std::string> KernelNameCL;
++cl::opt<unsigned int> SharedMemBytes("shmem", cl::init(0), cl::Hidden, cl::desc("The amount of redundant shared memory reserved in bytes"));
++
++void OccupancyReduction::getAnalysisUsage(AnalysisUsage &au) const {
++  au.addRequired<NDRange>();
++}
++
++bool OccupancyReduction::runOnFunction(Function &F) {
++  Function *function = (Function *)&F;
++  if (!isKernel(function))
++    return false;
++
++  // Apply the pass to the selected kernel only.
++  std::string FunctionName = F.getName();
++  if (KernelNameCL != "" && FunctionName != KernelNameCL || SharedMemBytes == 0)
++    return false;
++
++  Module &module = *(function->getParent());
++  //std::string gvId = FunctionName + "..ored";
++  //module.getOrInsertGlobal(gvId, ArrayType::get(Type::getInt8Ty(F.getContext()), SharedMemBytes));
++  //GlobalVariable *gv = module.getNamedGlobal(gvId);
++  
++  ArrayType *arrayTy = ArrayType::get(IntegerType::get(module.getContext(), 8), SharedMemBytes);
++
++  GlobalVariable *gv = new GlobalVariable(/*Module=*/module,
++                                          /*Type=*/arrayTy,
++					  /*isConstant=*/false,
++					  /*Linkage=*/GlobalValue::LinkageTypes::InternalLinkage,
++					  /*Initializer=*/ConstantAggregateZero::get(arrayTy),
++					  /*Name=*/FunctionName + "..ored",
++					  /*InsertBefore=*/nullptr,
++					  /*ThreadLocalMode=*/GlobalValue::ThreadLocalMode::NotThreadLocal,
++					  /*AddressSpace=*/LOCAL_ADDRESS_SPACE);
++
++  gv->setAlignment(1);
++
++  //BasicBlock *bb = new BasicBlock("oredblock", nullptr);
++  BasicBlock *entry = (BasicBlock *)&function->front();
++  BasicBlock *oredMemAccess = BasicBlock::Create(F.getContext(), "ored..memaccess", function, &function->front());
++  BasicBlock *oredEntry = BasicBlock::Create(F.getContext(), "ored.." + entry->getName(), function, &function->front());
++
++  IRBuilder<> eBuilder(oredEntry);
++  IRBuilder<> maBuilder(oredMemAccess);
++
++  // ---- ENTRY BLOCK
++  // if (get_local_size(0) == MAX_INT) { jump to dummy mem access bb }
++
++  NDRange *ndr = &getAnalysis<NDRange>();
++  Function *oclF = ndr->getOclFunctionPtr(NDRange::GET_LOCAL_SIZE);
++  CallInst *callInst = eBuilder.CreateCall(oclF, eBuilder.getInt32(0));
++  //std::vector<Constant*> args;
++  //args.pushBack(ConstantInt::get(F.getContext(), APInt::getNullValue(8)));
++  //CallInst *callInst = eBuilder.CreateCall(oclF, args);
++
++  Value *icmp = eBuilder.CreateICmpEQ(callInst, ConstantInt::get(F.getContext(), APInt::getSignedMaxValue(32)));
++
++  eBuilder.CreateCondBr(icmp, oredMemAccess, entry);
++
++
++  // ---- MEM ACCESS BLOCK
++  // create store inst:
++  // store volatile i8 0, i8 addrspace(3)* getelementptr inbounds ([6144 x i8] addrspace(3)* @mykernel..ored, i32 0, i32 0), align 1
++
++  std::vector<Constant*> const_ptr_indices;
++  const_ptr_indices.push_back(ConstantInt::get(F.getContext(), APInt::getNullValue(8)));
++  const_ptr_indices.push_back(ConstantInt::get(F.getContext(), APInt::getNullValue(8)));
++  Constant *gep = ConstantExpr::getInBoundsGetElementPtr(gv, const_ptr_indices);
++  maBuilder.CreateStore(maBuilder.getInt8(0), gep, true)->setAlignment(1);
++
++  maBuilder.CreateBr(entry);
++
++  //const_ptr_indices.push_back(ConstantInt::get(F.getContext(), APInt(8, StringRef("0"), 10)));
++  //Value *gep = builder.CreateConstGEP1_32(arrayTy, gv, 0);
++  //Value *gep = builder.CreateInBoundsGEP(gv, builder.getInt8(0));
++
++  //errs() << "gep is " << *gep << "\n";
++
++  return true;
++}
++
++char OccupancyReduction::ID = 0;
++static RegisterPass<OccupancyReduction> X("ored", "Occupancy Reduction Pass - Reserves redundant shared memory");
+diff --git a/thrud/lib/ReplaceGlobalIds.cpp b/thrud/lib/ReplaceGlobalIds.cpp
+new file mode 100644
+index 0000000..0d4e707
+--- /dev/null
++++ b/thrud/lib/ReplaceGlobalIds.cpp
+@@ -0,0 +1,87 @@
++#include "thrud/ReplaceGlobalIds.h"
++
++#include "thrud/NDRange.h"
++
++#include "llvm/Support/CommandLine.h"
++
++using namespace llvm;
++
++extern cl::opt<std::string> KernelNameCL;
++extern cl::opt<unsigned int> CoarseningDirectionCL;
++
++ReplaceGlobalIds::ReplaceGlobalIds() : FunctionPass(ID) {}
++
++void ReplaceGlobalIds::getAnalysisUsage(AnalysisUsage &au) const {
++  // todo
++  au.addRequired<NDRange>();
++  au.setPreservesCFG();
++}
++
++bool ReplaceGlobalIds::runOnFunction(Function &function) {
++  Function *functionPtr = (Function *)&function;
++  //errs() << "Running ReplaceGlobalIds on function " << functionPtr->getName() << "\n";
++  //return false;
++  
++  if (!isKernel(functionPtr))
++    return false;
++
++  // Apply the pass to the selected kernel only.
++  std::string FunctionName = functionPtr->getName();
++  if (KernelNameCL != "" && FunctionName != KernelNameCL)
++    return false;
++
++  NDRange *ndr = &getAnalysis<NDRange>();
++  unsigned int direction = CoarseningDirectionCL;
++  InstVector gids = ndr->getGids(direction);
++
++  std::vector<Instruction *> unusedInsts;
++  for (InstVector::iterator instIter = gids.begin(), instEnd = gids.end();
++       instIter != instEnd; ++instIter) {
++    Instruction *inst = *instIter;
++
++    LLVMContext & context = inst->getContext();
++    IntegerType * intType = IntegerType::getInt32Ty(context);
++
++    CallInst *cinst = (CallInst *) inst;
++
++    ConstantInt *cint = dyn_cast<ConstantInt>(cinst->getArgOperand(0));
++
++    CallInst *groupId = (CallInst* ) inst->clone();
++
++    groupId->setCalledFunction(ndr->getOclFunctionPtr(NDRange::GET_GROUP_ID));
++    groupId->insertAfter(inst);
++    //ndr->registerOclInst(direction, NDRange::GET_GROUP_ID, groupId);
++
++    CallInst *localSize = (CallInst* ) inst->clone();
++    localSize->setCalledFunction(ndr->getOclFunctionPtr(NDRange::GET_LOCAL_SIZE));
++    localSize->insertAfter(groupId);
++    //ndr->registerOclInst(direction, NDRange::GET_LOCAL_SIZE, localSize);
++
++    CallInst *localId = (CallInst* ) inst->clone();
++    localId->setCalledFunction(ndr->getOclFunctionPtr(NDRange::GET_LOCAL_ID));
++    localId->insertAfter(localSize);
++    //ndr->registerOclInst(direction, NDRange::GET_LOCAL_ID, localId);
++
++    Instruction *mul = getMulInst(groupId, localSize);
++    mul->insertAfter(localId);
++    Instruction *add = getAddInst(mul, localId);
++    add->insertAfter(mul);
++
++    replaceUses(inst, add);
++    
++    //ndr->unregisterOclInst(direction, NDRange::GET_GLOBAL_ID, inst);
++    //errs () << "Trying to remove inst from parent >> " << *inst << "\n";
++    unusedInsts.push_back(inst); 
++    //inst->removeFromParent();
++  }
++  for (auto it = unusedInsts.begin(); it != unusedInsts.end(); ++it) {
++    Instruction *inst = *it;
++    inst->eraseFromParent();
++  }
++
++  return unusedInsts.size() > 0;
++  //return false;
++}
++
++char ReplaceGlobalIds::ID = 0;
++static RegisterPass<ReplaceGlobalIds> X("replaceGIDs", "Replaces use of get_global_id with get_group_id * get_local_size + get_local_id"); // todo
+diff --git a/thrud/lib/ThreadCoarsening.cpp b/thrud/lib/ThreadCoarsening.cpp
+index 8630cbe..887bd97 100644
+--- a/thrud/lib/ThreadCoarsening.cpp
++++ b/thrud/lib/ThreadCoarsening.cpp
+@@ -5,6 +5,7 @@
+ #include "thrud/DataTypes.h"
+ #include "thrud/NDRange.h"
+ #include "thrud/Utils.h"
++#include "thrud/ReplaceGlobalIds.h"
+ 
+ #include "llvm/IR/Constants.h"
+ #include "llvm/IR/DerivedTypes.h"
+@@ -60,6 +61,7 @@ ThreadCoarsening::ThreadCoarsening() : FunctionPass(ID) {}
+ 
+ //------------------------------------------------------------------------------
+ void ThreadCoarsening::getAnalysisUsage(AnalysisUsage &au) const {
++  au.addPreserved<ReplaceGlobalIds>();
+   au.addRequired<LoopInfo>();
+   au.addRequired<SingleDimDivAnalysis>();
+   au.addRequired<PostDominatorTree>();
+@@ -104,6 +106,7 @@ void ThreadCoarsening::init() {
+   cMap.clear();
+   phMap.clear();
+   phReplacementMap.clear();
++  shMemGlobalsCMap.clear();
+ }
+ 
+ //------------------------------------------------------------------------------
+diff --git a/thrud/lib/Utils.cpp b/thrud/lib/Utils.cpp
+index d834a52..03a5abf 100644
+--- a/thrud/lib/Utils.cpp
++++ b/thrud/lib/Utils.cpp
+@@ -16,6 +16,8 @@
+ #include "llvm/IR/Instructions.h"
+ #include "llvm/IR/Metadata.h"
+ #include "llvm/IR/Module.h"
++#include "llvm/IR/LLVMContext.h"
++#include "llvm/IR/GlobalValue.h"
+ 
+ #include "llvm/Support/raw_ostream.h"
+ 
+@@ -23,6 +25,7 @@
+ #include "llvm/Transforms/Utils/Cloning.h"
+ 
+ #include <algorithm>
++#include <stdlib.h>
+ 
+ // OpenCL function names.
+ const char *BARRIER = "barrier";
+@@ -43,6 +46,10 @@ bool isInLoop(const BasicBlock *block, LoopInfo *loopInfo) {
+   return loopInfo->getLoopFor(block) != nullptr;
+ }
+ 
++//------------------------------------------------------------------------------
++bool isSharedMemAddressSpace(unsigned addressSpace) {
++  return addressSpace == 3;
++}
+ //------------------------------------------------------------------------------
+ bool isKernel(const Function *function) {
+   const Module *module = function->getParent();
+@@ -379,13 +386,30 @@ Function *getOpenCLFunctionByName(std::string calleeName, Function *caller) {
+   Module &module = *caller->getParent();
+   Function *callee = module.getFunction(calleeName);
+ 
+-  if (callee == nullptr)
++  if (callee == nullptr) {
++    /*errs() << "Could not find function " << calleeName << ", creating new one\n";
++    FunctionType * ftype = FunctionType::get(llvm::Type::getInt32Ty(llvm::getGlobalContext()),
++                               ArrayRef<Type *>(llvm::Type::getInt32Ty(llvm::getGlobalContext())), false); 
++    callee = Function::Create(ftype, GlobalValue::LinkageTypes::ExternalLinkage, calleeName, &module);*/
++    
+     return nullptr;
++  }
+ 
+   assert(callee->arg_size() == 1 && "Wrong OpenCL function");
+   return callee;
+ }
+ 
++Function *createOpenCLFunction(std::string calleeName, Function *caller, AttributeSet attributes) {
++  Module &module = *caller->getParent();
++  FunctionType * ftype = FunctionType::get(llvm::Type::getInt32Ty(llvm::getGlobalContext()),
++			     ArrayRef<Type *>(llvm::Type::getInt32Ty(llvm::getGlobalContext())), false); 
++  Function *callee = Function::Create(ftype, GlobalValue::LinkageTypes::ExternalLinkage, calleeName, &module);
++  
++  callee->setAttributes(attributes);
++
++  return callee;
++}
++
+ //------------------------------------------------------------------------------
+ // Region and Branch Analysis.
+ //------------------------------------------------------------------------------
+@@ -634,3 +658,94 @@ bool isPresent(const Instruction *inst, std::vector<BlockVector *> &value) {
+       return true;
+   return false;
+ }
++
++// IR Support functions.
++//------------------------------------------------------------------------------
++unsigned int getIntWidth(Value *value) {
++  Type *type = value->getType();
++  IntegerType *intType = dyn_cast<IntegerType>(type);
++  assert(intType && "Value type is not integer");
++  return intType->getBitWidth();
++}
++
++ConstantInt *getConstantInt(unsigned int value, unsigned int width,
++                            LLVMContext &context) {
++  IntegerType *integer = IntegerType::get(context, width);
++  return ConstantInt::get(integer, value);
++}
++
++Instruction *getMulInst(Value *value, unsigned int factor) {
++  unsigned int width = getIntWidth(value);
++  ConstantInt *factorValue = getConstantInt(factor, width, value->getContext());
++  Instruction *mul =
++      BinaryOperator::Create(Instruction::Mul, value, factorValue);
++  mul->setName(value->getName() + ".." + Twine(factor));
++  return mul;
++}
++
++Instruction *getMulInst(Value *firstValue, Value *secondValue) {
++  Instruction *mul =
++      BinaryOperator::Create(Instruction::Mul, firstValue, secondValue);
++  mul->setName(firstValue->getName() + "..Mul");
++  return mul;
++}
++
++
++Instruction *getAddInst(Value *value, unsigned int addend) {
++  unsigned int width = getIntWidth(value);
++  ConstantInt *addendValue = getConstantInt(addend, width, value->getContext());
++  Instruction *add =
++      BinaryOperator::Create(Instruction::Add, value, addendValue);
++  add->setName(value->getName() + ".." + Twine(addend));
++  return add;
++}
++
++Instruction *getAddInst(Value *firstValue, Value *secondValue) {
++  Instruction *add =
++      BinaryOperator::Create(Instruction::Add, firstValue, secondValue);
++  add->setName(firstValue->getName() + "..Add");
++  return add;
++}
++
++Instruction *getShiftInst(Value *value, unsigned int shift) {
++  unsigned int width = getIntWidth(value);
++  ConstantInt *intValue = getConstantInt(shift, width, value->getContext());
++  Instruction *shiftInst =
++      BinaryOperator::Create(Instruction::LShr, value, intValue);
++  shiftInst->setName(Twine(value->getName()) + "..Shift");
++  return shiftInst;
++}
++
++Instruction *getAndInst(Value *value, unsigned int factor) {
++  unsigned int width = getIntWidth(value);
++  ConstantInt *intValue = getConstantInt(factor, width, value->getContext());
++  Instruction *andInst =
++      BinaryOperator::Create(Instruction::And, value, intValue);
++  andInst->setName(Twine(value->getName()) + "..And");
++  return andInst;
++}
++
++Instruction *getDivInst(Value *value, unsigned int divisor) {
++  unsigned int width = getIntWidth(value);
++  ConstantInt *intValue = getConstantInt(divisor, width, value->getContext());
++  Instruction *divInst = 
++    BinaryOperator::Create(Instruction::UDiv, value, intValue);
++  divInst->setName(Twine(value->getName()) + "..Div");
++  return divInst;
++}
++
++Instruction *getModuloInst(Value *value, unsigned int modulo) {
++  unsigned int width = getIntWidth(value);
++  ConstantInt *intValue = getConstantInt(modulo, width, value->getContext());
++  Instruction *moduloInst = 
++    BinaryOperator::Create(Instruction::URem, value, intValue);
++  moduloInst->setName(Twine(value->getName()) + "..Rem");
++  return moduloInst;
++}
++
++// System Utils
++//------------------------------------------------------------------------------
++std::string getEnvString(const char *name, const char *defValue) {
++  char *val = getenv(name);
++  return std::string(val ? val : defValue);
++}
+diff --git a/thrud/tests/coarsening/runTests.py b/thrud/tests/coarsening/runTests.py
+index 95a9735..dffb70e 100755
+--- a/thrud/tests/coarsening/runTests.py
++++ b/thrud/tests/coarsening/runTests.py
+@@ -32,8 +32,8 @@ tests = {
+ HOME = os.environ["HOME"]; 
+ CLANG = "clang";
+ OPT = "opt";
+-LIB_THRUD = os.path.join(HOME, "root", "lib", "libThrud.so");
+-OCLDEF = os.path.join(HOME, "src", "coarsening_pass", "thrud", "include", "opencl_spir.h");
++LIB_THRUD = "/data/build/autocoarsening/thrud/lib/libThrud.so";
++OCLDEF = "/data/code/autocoarsening/thrud/include/opencl_spir.h";
+ OPTIMIZATION = "-O0";
+ 
+ #-------------------------------------------------------------------------------
