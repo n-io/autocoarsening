@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 2.8.8)
 
-project("coarsening_pass")
+project("autocoarsening")
 
 set(CMAKE_CXX_COMPILER "g++")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
@@ -26,19 +26,31 @@ set(OPENCL_WRAPPER_LIB "OpenCLWrapper")
 
 # LLVM.
 # Set this to your LLVM cmake directory.
-set(LLVM_DIR "~/build/llvm/share/llvm/cmake/")
+set(LLVM_DIR "/data/build/llvm/share/llvm/cmake/")
+
+# set cuda path, only required for this file
+if(EXISTS "/usr/local/cuda/")
+  set(CUDA_PATH "/usr/local/cuda")
+else(EXISTS "/usr/local/cuda/")
+  set(CUDA_PATH "/vol/cuda/8.0.61")
+endif(EXISTS "/usr/local/cuda/")
 
 # OpenCL.
 # Set this to the directory containing cl/cl.h.
-set(OPENCL_INCLUDE_PATH "/opt/AMDAPP/include")
+  set(OPENCL_INCLUDE_PATH "${CUDA_PATH}/include/")
 find_library(OPENCL_LIBRARY_PATH OpenCL
-             "/opt/AMDAPP/lib/x86_64/"
-             DOC "The OpenCL Library")
+             PATHS "${CUDA_PATH}/lib64"
+	     DOC "The OpenCL Library"
+	     NO_DEFAULT_PATH
+	     NO_CMAKE_PATH
+	     NO_CMAKE_ENVIRONMENT_PATH
+	     NO_SYSTEM_ENVIRONMENT_PATH)
 if(EXISTS ${OPENCL_LIBRARY_PATH})
   message(STATUS "Looking for OPENCL: found")
 else(EXISTS ${OPENCL_LIBRARY_PATH})
   message(FATAL_ERROR "Looking for OPENCL: not found")
 endif(EXISTS ${OPENCL_LIBRARY_PATH})
+message(STATUS "OpenCL found in: " ${OPENCL_LIBRARY_PATH})
 
 add_subdirectory(${THRUD_DIR})
 add_subdirectory(${OPENCL_TOOLS_DIR})

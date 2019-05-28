@@ -40,5 +40,8 @@ typedef std::stack<BasicBlock *> BlockStack;
 typedef std::deque<Instruction *> InstDeque;
 typedef std::deque<BasicBlock *> BlockDeque;
 typedef std::map<Instruction *, InstVector> CoarseningMap;
+typedef std::set<GlobalVariable *> GlobalsSet;
+typedef std::map<Function *, GlobalsSet> GlobalsMap;
+typedef std::map<GlobalVariable *, std::vector<GlobalVariable *>> GlobalsCMap;
 
 #endif

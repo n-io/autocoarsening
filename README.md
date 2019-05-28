@@ -1,16 +1,6 @@
 LLVM Thread Coarsening Pass for OpenCL
 ======================================
 
-Disclaimer
-----------
-
-The code here is an extension of [Alberto Magni's][email/alberto] [thread coarsening pass][www/originalCoarsening].
-All rights of the original un-patched code remain with the author.
-
-This repository contains a patch for the original code, and for convenience and development includes
-a fully patched version. The original coarsening pass is retained in the initial commit, all further
-work is our own.
-
 Content
 -------
 
@@ -50,12 +40,7 @@ and then rebase both to the specified versions.
 Publications
 ------------
 
-The extension to the coarsening pass is described in:
-
-* [TACO June 2018] Predictable Thread Coarsening
-Nicolai Stawinoga, Tony Field
-
-The original coarsening pass has been used for the following publications:
+The coarsening pass has been used for the following publications:
 
 * [SC13] A Large-Scale Cross-Architecture Evaluation of Thread-Coarsening
 Alberto Magni, Christophe Dubach, Michael O'Boyle 
@@ -66,10 +51,8 @@ Alberto Magni, Christophe Dubach, Michael O'Boyle
 
 The papers used an older version of the pass for LLVM 3.4.
 
-For any question please contact [Nicolai Staiwnoga][email/nicolai].
+For any question please contact [Alberto Magni][email/alberto].
 
-[email/nicolai]: n.stawinoga13@imperial.ac.uk
 [email/alberto]: a.magni@sms.ed.ac.uk
-[www/originalCoarsening]: https://github.com/HariSeldon/coarsening_pass
 [www/llvmProject]: http://llvm.org/docs/Projects.html
 [www/llvmGit]: http://llvm.org/docs/GettingStarted.html#git-mirror 

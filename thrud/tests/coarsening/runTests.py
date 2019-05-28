@@ -32,8 +32,8 @@ tests = {
 HOME = os.environ["HOME"]; 
 CLANG = "clang";
 OPT = "opt";
-LIB_THRUD = os.path.join(HOME, "root", "lib", "libThrud.so");
-OCLDEF = os.path.join(HOME, "src", "coarsening_pass", "thrud", "include", "opencl_spir.h");
+LIB_THRUD = "/data/build/autocoarsening/thrud/lib/libThrud.so";
+OCLDEF = "/data/code/autocoarsening/thrud/include/opencl_spir.h";
 OPTIMIZATION = "-O0";
 
 #-------------------------------------------------------------------------------

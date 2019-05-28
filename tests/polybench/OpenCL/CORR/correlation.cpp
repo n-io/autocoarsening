@@ -68,7 +68,7 @@ char str_temp[1024];
 #define FLOAT_N 3214212.01
 #define EPS 0.005
 
-int M = M_DEFAULT;
+int M = 1920*M_DEFAULT;
 int N = N_DEFAULT;
 
 cl_platform_id platform_id;

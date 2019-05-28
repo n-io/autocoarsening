@@ -30,8 +30,8 @@
 #define MAX_SOURCE_SIZE (0x100000)
 
 /* Problem size */
-#define N_DEFAULT 2048
-#define M_DEFAULT 2048
+#define N_DEFAULT 15*128
+#define M_DEFAULT 15*128
 
 /* Thread block dimensions */
 #define DIM_LOCAL_WORK_GROUP_X 32
@@ -208,8 +208,8 @@ void syr2k(DATA_TYPE *A, DATA_TYPE *B, DATA_TYPE *C, DATA_TYPE *result) {
     intReps = atoi(reps);
   }
 
-  for (i = 0; i < 128; i++) {
-    for (j = 0; j < 128; j++) {
+  for (i = 0; i < N; i++) {
+    for (j = 0; j < M; j++) {
       for (int rep = 0; rep < intReps; ++rep) {
         for (k = 0; k < M; k++) {
           C[i * N + j] += ALPHA * A[i * M + k] * B[j * M + k];

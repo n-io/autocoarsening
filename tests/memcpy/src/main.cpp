@@ -17,7 +17,8 @@
 #include "bench_support.h"
 
 //-----------------------------------------------------------------------------
-constexpr int SIZE = 512;
+constexpr int SIZE = 1920 * 512;
+constexpr int LINE_SIZE = 512;
 std::vector<size_t> globalWorkSize = { SIZE };
 std::vector<size_t> localWorkSize = { 256 };
 
@@ -50,6 +51,7 @@ Buffer *input = nullptr;
 Buffer *output = nullptr;
 
 cl_int *size = nullptr;
+cl_int *lineSize = nullptr;
 
 // Device.
 int PLATFORM_ID = 0;
@@ -129,7 +131,8 @@ void freeMemory() {
 //-----------------------------------------------------------------------------
 void hostMemoryAlloc() {
   size = new cl_int(globalWorkSize[0]);
-  int bufferSize = globalWorkSize[0] * (*size); 
+  int bufferSize = LINE_SIZE * (*size);
+  lineSize = new cl_int(kernelName.compare("rmrrmw") == 0 ? LINE_SIZE : SIZE);
 
   std::random_device randomDevice;
   std::mt19937_64 gen(randomDevice());
@@ -169,7 +172,7 @@ void enqueReadCommands(Queue &queue) {
 void setKernelArguments() {
   kernel->setArgument(0, *input);
   kernel->setArgument(1, *output);
-  kernel->setArgument(2, sizeof(cl_int), (void *)size);
+  kernel->setArgument(2, sizeof(cl_int), (void *)lineSize);
 }
 
 //-----------------------------------------------------------------------------

@@ -64,7 +64,7 @@ char *source_str;
 size_t source_size;
 
 size_t NJ = NJ_DEFAULT;
-size_t NK = NK_DEFAULT;
+size_t NK = NK_DEFAULT * 480;
 
 void read_cl_file() {
   // Load the kernel source code into the array source_str

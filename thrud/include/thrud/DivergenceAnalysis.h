@@ -19,6 +19,7 @@ public:
   InstVector &getOutermostDivInsts();
   InstVector getDivInsts(DivergentRegion *region);
   bool isDivergent(Instruction *inst);
+  GlobalsSet &getShMemGlobalsUsedIn(Function *f);
 
   RegionVector &getDivRegions();
   RegionVector &getOutermostDivRegions();
@@ -35,12 +36,16 @@ protected:
                           InstVector &result);
   void findOutermostRegions();
 
+private:
+  void findUsesOf(Instruction *inst, InstSet &result);
+
 protected:
   InstVector divInsts;
   InstVector outermostDivInsts;
   InstVector divBranches;
   RegionVector regions;
   RegionVector outermostRegions;
+  GlobalsMap shMemGlobals;
 
   NDRange *ndr;
   PostDominatorTree *pdt;

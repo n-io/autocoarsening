@@ -51,7 +51,7 @@ typedef float DATA_TYPE;
 
 char str_temp[1024];
 
-size_t NX = NX_DEFAULT;
+size_t NX = 240*NX_DEFAULT;
 
 cl_platform_id platform_id;
 cl_device_id device_id;

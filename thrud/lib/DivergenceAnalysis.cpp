@@ -1,6 +1,7 @@
 #include "thrud/DivergenceAnalysis.h"
 
 #include "thrud/DivergentRegion.h"
+#include "thrud/ReplaceGlobalIds.h"
 #include "thrud/Utils.h"
 
 #include "llvm/Pass.h"
@@ -11,6 +12,7 @@
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalVariable.h"
 
 #include "llvm/ADT/Statistic.h"
 
@@ -155,7 +157,7 @@ void DivergenceAnalysis::findOutermostInsts(InstVector &insts,
   }
 
   // Remove from result all the calls to builtin functions.
-  InstVector oclIds = ndr->getTids();
+  InstVector oclIds = ndr->getDivergentIds();
   InstVector tmp;
 
   size_t oldSize = result.size();
@@ -249,15 +251,59 @@ bool DivergenceAnalysis::isDivergent(Instruction *inst) {
   return isPresent(inst, divInsts);
 }
 
+//------------------------------------------------------------------------------
+GlobalsSet &DivergenceAnalysis::getShMemGlobalsUsedIn(Function *f) {
+  return shMemGlobals[f];
+}
+
 // Support functions.
 //------------------------------------------------------------------------------
-void findUsesOf(Instruction *inst, InstSet &result) {
+void DivergenceAnalysis::findUsesOf(Instruction *inst, InstSet &result) {
   for (auto userIter = inst->user_begin(), userEnd = inst->user_end();
        userIter != userEnd; ++userIter) {
     if (Instruction *userInst = dyn_cast<Instruction>(*userIter)) {
       result.insert(userInst);
     }
   }
+  if (!THREAD_LEVEL_COARSENING) {
+    // handling sharedMem accesses separately
+    if (StoreInst *storeInst = dyn_cast<StoreInst>(inst)) {
+      if (isSharedMemAddressSpace(storeInst->getPointerAddressSpace())) {
+	if (GetElementPtrInst *getElementPtrInst = dyn_cast<GetElementPtrInst>(storeInst->getPointerOperand())) {
+	  if (GlobalVariable *gv = dyn_cast<GlobalVariable>(getElementPtrInst->getPointerOperand())) {
+	    // find all uses of shared mem
+	    for (auto userIter = gv->user_begin(), userEnd = gv->user_end();
+		 userIter != userEnd; ++userIter) {
+	      if (Instruction *userInst = dyn_cast<Instruction>(*userIter)) {
+		if (userInst != storeInst) {
+		  result.insert(userInst);
+		}
+	      } else {
+		// it might be an expression inside a LoadInst
+		for (auto it = userIter->user_begin(), itEnd = userIter->user_end(); it != itEnd; ++it) {
+		  if (Instruction *userInst = dyn_cast<Instruction>(*it)) {
+		    if (userInst != storeInst) {
+		      result.insert(userInst);
+		    }
+		  }
+		}
+	      }
+	    }
+	    // register shared mem in globals map
+	    shMemGlobals[storeInst->getParent()->getParent()].insert(gv);
+	    //errs() << "Found " << result.size() << " uses of " << *inst << " using global variable " << *gv << ":\n";
+	  } else {
+	    errs() << "Found access to sharedMem where address not held in global variable\n";
+	  }
+	} else {
+	  errs() << "Found access to sharedMem but could not obtain GetElementPtr instruction\n";
+	}
+      }
+    }
+  }
+  //errs() << "Found " << result.size() << " uses of " << *inst << ":\n";
+  //dumpSet(result);
+  //errs() << "--------\n";
 }
 
 //------------------------------------------------------------------------------
@@ -290,6 +336,7 @@ bool isOutermost(DivergentRegion *region, RegionVector &regions) {
 SingleDimDivAnalysis::SingleDimDivAnalysis() : FunctionPass(ID) {}
 
 void SingleDimDivAnalysis::getAnalysisUsage(AnalysisUsage &au) const {
+  au.addRequired<ReplaceGlobalIds>();
   au.addRequired<LoopInfo>();
   au.addPreserved<LoopInfo>();
   au.addRequired<PostDominatorTree>();
@@ -320,7 +367,7 @@ bool SingleDimDivAnalysis::runOnFunction(Function &functionRef) {
 }
 
 InstVector SingleDimDivAnalysis::getTids() {
-  return ndr->getTids(CoarseningDirectionCL);
+  return ndr->getDivergentIds(CoarseningDirectionCL);
 }
 
 char SingleDimDivAnalysis::ID = 0;
@@ -360,7 +407,7 @@ bool MultiDimDivAnalysis::runOnFunction(Function &functionRef) {
   return false;
 }
 
-InstVector MultiDimDivAnalysis::getTids() { return ndr->getTids(); }
+InstVector MultiDimDivAnalysis::getTids() { return ndr->getDivergentIds(); }
 
 char MultiDimDivAnalysis::ID = 0;
 static RegisterPass<MultiDimDivAnalysis>

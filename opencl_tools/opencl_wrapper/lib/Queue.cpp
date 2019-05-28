@@ -21,6 +21,21 @@ Queue::~Queue() throw() {
   clReleaseCommandQueue(queue);
 }
 
+// Copy buffer.
+//------------------------------------------------------------------------------
+void Queue::copyBuffer(const Buffer& src, const Buffer& dest, size_t size) {
+  cl_int errorCode = clEnqueueCopyBuffer (queue,
+                                          src.getId(),
+                                          dest.getId(),
+					  0, // src_offset
+					  0, // dest_offset
+					  size,
+					  0, //cl_uint num_events_in_wait_list
+					  NULL, //const cl_event *event_wait_list
+					  NULL); //cl_event *event
+  verifyOutputCode(errorCode, "Error copying the buffer");
+}
+
 // Read buffer.
 //------------------------------------------------------------------------------
 void Queue::readBuffer(const Buffer& buffer, size_t size, void* pointer) {

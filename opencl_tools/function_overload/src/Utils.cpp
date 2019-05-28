@@ -14,9 +14,11 @@
 #include <vector>
 
 #define RELAXED_MATH "-cl-fast-relaxed-math"
-#define OCL_OPTIONS_NUMBER 1
+#define CL_BUILD_VERBOSE "-cl-nv-verbose"
+#define OCL_OPTIONS_NUMBER 2
+#define __utils_verboseXX 1 
 
-const char *oclOptionsList[OCL_OPTIONS_NUMBER] = {RELAXED_MATH};
+const char *oclOptionsList[OCL_OPTIONS_NUMBER] = {RELAXED_MATH, CL_BUILD_VERBOSE};
 
 // System Functions.
 //------------------------------------------------------------------------------
@@ -182,7 +184,13 @@ inline bool isError(cl_int valueToCheck) { return valueToCheck != CL_SUCCESS; }
 void verifyOutputCode(cl_int valueToCheck, const char *errorMessage) {
   if (isError(valueToCheck)) {
     std::cout << errorMessage << " " << valueToCheck << "\n";
-    exit(valueToCheck);
+    std::string maxCoarseningFactor = getEnvString("MAX_COARSENING_FACTOR");
+    if (maxCoarseningFactor.empty()) {
+      exit(valueToCheck);
+    } else {
+      // do not exit if we're compiling several versions of code
+      throw 20;
+    }
   }
 }
 
@@ -214,12 +222,14 @@ std::string getKernelName(cl_kernel kernel) {
 //------------------------------------------------------------------------------
 int compileWithAxtor(std::string &inputFile, std::string &clangOptions,
                      std::string &optOptions, std::string &outputFile,
-                     int seed) {
+                     int seed, bool cacheLineReuseAnalysis) {
   std::string bitcodeFile = getMangledFileName(BC_FILE, seed);
+  //std::string bitcodeFilePostAxtor = getMangledFileName(BC_POST_AXTOR_FILE, seed);
+  std::string clrFile = getMangledFileName(CLR_FILE, seed);
 
   // Inline commands.
   std::string sedCmdOne = "sed \'s/__inline/inline/\' -i " + inputFile;
-  std::string sedCmdTwo = "sed \'s/inline/static inline/\' -i " + inputFile;
+  std::string sedCmdTwo = "sed \'s/static inline\\|inline/static inline/\' -i " + inputFile;
 
   std::string oclHeader = getEnvString("OCL_HEADER");
 
@@ -227,19 +237,36 @@ int compileWithAxtor(std::string &inputFile, std::string &clangOptions,
   // Clang command.
   std::string clangCmd = "LD_PRELOAD=\"\" clang -x cl -target spir -include " +
                          oclHeader + " -O0 " + clangOptions + " " + inputFile +
-                         " -S -emit-llvm -fno-builtin -o " + bitcodeFile +
-                         " 2> /dev/null";
+                         " -S -emit-llvm -fno-builtin -o " + bitcodeFile;
+
+  std::string clrOptions = cacheLineReuseAnalysis ? getEnvString("CLR_OPTIONS") : "";
+  std::string clrCmd = "LD_PRELOAD=\"\" opt " + clrOptions + " " + bitcodeFile + " 1> /dev/null 2> " + clrFile;
+  //std::string clrClangCmd = "LD_PRELOAD=\"\" clang -x cl -target spir -include " +
+  //                          oclHeader + " -O0 " + clangOptions + " " + outputFile +
+  //                          " -S -emit-llvm -fno-builtin -o " + bitcodeFilePostAxtor;
+  //std::string clrCmd = "LD_PRELOAD=\"\" opt " + clrOptions + " " + bitcodeFilePostAxtor + " 1> /dev/null 2> " + clrFile;
+
+  std::string oredOptions = getEnvString("OCCUPANCY_REDUCTION");
+  bool occupancyReduction = !oredOptions.empty();
+  std::string oredCmd = "LD_PRELOAD=\"\" opt " + oredOptions + " " + bitcodeFile + " -S -o " + bitcodeFile; 
 
   // Opt command.
-  std::string optCmd = "LD_PRELOAD=\"\" opt " + optOptions + " " + bitcodeFile +
-                       " -o " + bitcodeFile + " 2> /dev/null";
+  std::string optCmd = "LD_PRELOAD=\"\" opt " + optOptions + " -dce -S " + bitcodeFile + // todo undo and add -O1
+                       " -o " + bitcodeFile;
+
+  std::string reoptCmd = "LD_PRELOAD=\"\" opt  -O2 " + bitcodeFile +
+                       " -o " + bitcodeFile;
 
   // Axtor command.
   std::string axtorCmd = "LD_PRELOAD=\"\" axtor " + bitcodeFile + " -m OCL " +
-                         "-o " + outputFile + " 2> /dev/null";
-
-  std::cout << "CLANG:\n" << clangCmd << "\nOPT:\n" << optCmd << "\nAXTOR:\n"
-            << axtorCmd << "\n";
+                         "-o " + outputFile;
+#ifdef __utils_verbose
+  std::cout << "CLANG:\n" << clangCmd 
+            << (cacheLineReuseAnalysis ? "\nCLR:\n" : "") << (cacheLineReuseAnalysis ? clrCmd : "")
+	    << (occupancyReduction ? "\nORED:\n" : "") << (occupancyReduction ? oredCmd : "")
+            << "\nOPT:\n" << optCmd
+            << "\nAXTOR:\n" << axtorCmd << "\n";
+#endif
 
   // Inline.
   system(sedCmdOne.c_str());
@@ -251,10 +278,31 @@ int compileWithAxtor(std::string &inputFile, std::string &clangOptions,
     return 1;
   }
 
-  // Opt.
+  /*// CacehDependenceAnalysis
+  if (cacheLineReuseAnalysis && system(clrCmd.c_str())) {
+    std::cout << "&&&&& CACHE_DEPENDENCE_ANALYSIS_FAILURE!";
+    return 4;
+  }*/
+
+  // Opt with coarsening
   if (system(optCmd.c_str())) {
     std::cout << "&&&&& OPT_FAILURE!";
     return 2;
+  }
+
+  /*if (system(reoptCmd.c_str())) {
+    std::cout << "&&&&& RE_OPT_FAILURE!";
+    return 5;
+  }*/
+
+  if (cacheLineReuseAnalysis && system(clrCmd.c_str())) {
+    std::cout << "&&&&& CACHE_LINE_REUSE_ANALYSIS_FAILURE!";
+    return 4;
+  }
+
+  if (occupancyReduction && system(oredCmd.c_str())) {
+    std::cout << "&&&&& OCCUPANCY_REDUCTION_FAILURE!";
+    return 6;
   }
 
   // Axtor.
@@ -263,6 +311,18 @@ int compileWithAxtor(std::string &inputFile, std::string &clangOptions,
     return 3;
   }
 
+  // Post-axtor CLR
+  /*if (cacheLineReuseAnalysis) {
+    if (system(clrClangCmd.c_str())) {
+      std::cout << "&&&&& POST-AXTOR (PRE-CLR) CLANG FAILURE!";
+      return 4;
+    }
+    if (system(clrCmd.c_str())) {
+      std::cout << "&&&&& CACHE_LINE_REUSE_ANALYSIS_FAILURE!";
+      return 5;
+    }
+  }*/
+
   // size_t bb;
   // char *tmp;
   // tmp = readFile(outputFile.c_str(), &bb);
@@ -270,7 +330,7 @@ int compileWithAxtor(std::string &inputFile, std::string &clangOptions,
 
   // Remove the bitcode file.
   std::string remove = "rm " + bitcodeFile;
-  system(remove.c_str());
+  //system(remove.c_str()); // todo undo
 
   return 0;
 }
@@ -292,6 +352,15 @@ bool computeNDRangeDim(unsigned int dimensions, const size_t *globalSize,
 
   CF = cp.first;
   CD = cp.second;
+  
+  // this contains CF determined by model
+  std::string cfOverride = getEnvString("CF_OVERRIDE");
+  if (!cfOverride.empty()) {
+    CF = std::stoi(cfOverride);
+#ifdef __utils_verbose
+    std::cout << "Applied CF_OVERRIDE of factor " << CF << std::endl;
+#endif
+  }
 
   if (CF == 0 && CD == 0) {
     cp = getVectorizationOptions(compilerOptions);
@@ -324,8 +393,20 @@ bool computeNDRangeDim(unsigned int dimensions, const size_t *globalSize,
       newGlobalSize[CD] = globalSize[CD];
       newLocalSize[CD] = localSize[CD];
     }
-    newGlobalSize[CD] = globalSize[CD] / CF;
-    newLocalSize[CD] = localSize[CD] / CF;
+    std::string applyThreadLevelCoarsening = getEnvString("THREAD_LEVEL_COARSENING");
+    if (applyThreadLevelCoarsening.empty()) {
+#ifdef __utils_verbose
+      std::cout << "Using block level coarsening\n";
+#endif
+      newGlobalSize[CD] = globalSize[CD] / CF;
+      newLocalSize[CD] = localSize[CD];
+    } else {
+#ifdef __utils_verbose
+      std::cout << "Using thread level coarsening\n";
+#endif
+      newGlobalSize[CD] = globalSize[CD] / CF;
+      newLocalSize[CD] = localSize[CD] / CF;
+    }
 
     if (newGlobalSize[CD] == 0 || newLocalSize[CD] == 0) {
       newGlobalSize[CD] = globalSize[CD];
@@ -352,6 +433,8 @@ void enqueueKernel(cl_command_queue command_queue, cl_kernel kernel,
 
   cl_int errorCode = 0;
 
+  // printing global/local sizes
+#ifdef __utils_verbose
   for (unsigned int index = 0; index < work_dim; ++index) {
     std::cout << "gs[" << index << "] = " << global_work_size[index] << "\n";
     if (local_work_size != NULL)
@@ -359,6 +442,24 @@ void enqueueKernel(cl_command_queue command_queue, cl_kernel kernel,
     else
       std::cout << "ls = NULL\n";
   }
+  std::cout << "Blocks: ";
+#endif
+  int totalBlocks = 1;
+  if (local_work_size != NULL) {
+    for (unsigned int index = 0; index < work_dim; ++index) {
+      int dimBlocks = global_work_size[index] / local_work_size[index];
+#ifdef __utils_verbose
+      std::cout << dimBlocks;
+#endif
+      totalBlocks *= dimBlocks;
+      if (index + 1 < work_dim) std::cout << "x";
+    }
+  } else {
+    totalBlocks = -1; // local size is NULL, use dummy value
+  }
+#ifdef __utils_verbose
+  std::cout << " = " << totalBlocks << std::endl;
+#endif
 
   for (unsigned int index = 0; index < repetitions; ++index) {
     errorCode = originalclEnqueueKernel(
@@ -368,9 +469,9 @@ void enqueueKernel(cl_command_queue command_queue, cl_kernel kernel,
     clFinish(command_queue);
     cl_int eventStatus = clWaitForEvents(1, event);
     if (eventStatus == -5)
-      std::cerr << kernelName + " 0\n";
+      std::cout << kernelName + " 0\n";
     else
-      std::cerr << kernelName << " " << computeEventDuration(event) << "\n";
+      std::cout << kernelName << " " << computeEventDuration(event) << "\n";
     verifyOutputCode(errorCode, "Error releasing the event");
   }
 }

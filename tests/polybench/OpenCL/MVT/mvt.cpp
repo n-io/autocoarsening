@@ -31,7 +31,8 @@
 #define MAX_SOURCE_SIZE (0x100000)
 
 /* Problem size */
-#define N_DEFAULT 4096
+#define N_DEFAULT 15*4096
+#define WIDTH_DEFAULT 512
 
 /* Thread block dimensions */
 #define DIM_LOCAL_WORK_GROUP_X 256
@@ -58,9 +59,7 @@ cl_program clProgram;
 
 cl_mem a_mem_obj;
 cl_mem x1_mem_obj;
-cl_mem x2_mem_obj;
 cl_mem y1_mem_obj;
-cl_mem y2_mem_obj;
 
 FILE *fp;
 char *source_str;
@@ -68,6 +67,7 @@ size_t source_size;
 char str_temp[1024];
 
 size_t N = N_DEFAULT;
+size_t WIDTH = WIDTH_DEFAULT;
 
 void read_cl_file() {
   // Load the kernel source code into the array source_str
@@ -87,42 +87,34 @@ void init_arrays(DATA_TYPE *a, DATA_TYPE *x1, DATA_TYPE *x2, DATA_TYPE *y_1,
 
   for (i = 0; i < N; i++) {
     x1[i] = 0.0;
-    x2[i] = 0.0;
-    y_1[i] = 0.0;
-    y_2[i] = 0.0;
 
-    for (j = 0; j < N; j++) {
+    for (j = 0; j < WIDTH; j++) {
       a[i * N + j] = random<DATA_TYPE>();
     }
+  }
+  for (i = 0; i < WIDTH; i++) {
+    y_1[i] = 0.0;
   }
 }
 
 void cl_mem_init(DATA_TYPE *a, DATA_TYPE *x1, DATA_TYPE *x2, DATA_TYPE *y_1,
                  DATA_TYPE *y_2) {
   a_mem_obj = clCreateBuffer(clGPUContext, CL_MEM_READ_WRITE,
-                             sizeof(DATA_TYPE) * N * N, NULL, &errcode);
+                             sizeof(DATA_TYPE) * N * WIDTH, NULL, &errcode);
   x1_mem_obj = clCreateBuffer(clGPUContext, CL_MEM_READ_WRITE,
                               sizeof(DATA_TYPE) * N, NULL, &errcode);
-  x2_mem_obj = clCreateBuffer(clGPUContext, CL_MEM_READ_WRITE,
-                              sizeof(DATA_TYPE) * N, NULL, &errcode);
   y1_mem_obj = clCreateBuffer(clGPUContext, CL_MEM_READ_WRITE,
-                              sizeof(DATA_TYPE) * N, NULL, &errcode);
-  y2_mem_obj = clCreateBuffer(clGPUContext, CL_MEM_READ_WRITE,
-                              sizeof(DATA_TYPE) * N, NULL, &errcode);
+                              sizeof(DATA_TYPE) * WIDTH, NULL, &errcode);
 
   if (errcode != CL_SUCCESS)
     printf("Error in creating buffers\n");
 
   errcode = clEnqueueWriteBuffer(clCommandQue, a_mem_obj, CL_TRUE, 0,
-                                 sizeof(DATA_TYPE) * N * N, a, 0, NULL, NULL);
+                                 sizeof(DATA_TYPE) * N * WIDTH, a, 0, NULL, NULL);
   errcode = clEnqueueWriteBuffer(clCommandQue, x1_mem_obj, CL_TRUE, 0,
                                  sizeof(DATA_TYPE) * N, x1, 0, NULL, NULL);
-  errcode = clEnqueueWriteBuffer(clCommandQue, x2_mem_obj, CL_TRUE, 0,
-                                 sizeof(DATA_TYPE) * N, x2, 0, NULL, NULL);
   errcode = clEnqueueWriteBuffer(clCommandQue, y1_mem_obj, CL_TRUE, 0,
-                                 sizeof(DATA_TYPE) * N, y_1, 0, NULL, NULL);
-  errcode = clEnqueueWriteBuffer(clCommandQue, y2_mem_obj, CL_TRUE, 0,
-                                 sizeof(DATA_TYPE) * N, y_2, 0, NULL, NULL);
+                                 sizeof(DATA_TYPE) * WIDTH, y_1, 0, NULL, NULL);
 
   if (errcode != CL_SUCCESS)
     printf("Error in writing buffers\n");
@@ -144,15 +136,13 @@ void cl_load_prog() {
 
   // Create the 1st OpenCL kernel
   clKernel1 = clCreateKernel(clProgram, "mvt_kernel1", &errcode);
-  //  // Create the 2nd OpenCL kernel
-  //  clKernel2 = clCreateKernel(clProgram, "mvt_kernel2", &errcode);
   if (errcode != CL_SUCCESS)
     printf("Error in creating kernel\n");
   clFinish(clCommandQue);
 }
 
 void cl_launch_kernel() {
-  int n = N;
+  int n = WIDTH;
 
   size_t oldLocalWorkSize[1], globalWorkSize[1];
   oldLocalWorkSize[0] = DIM_LOCAL_WORK_GROUP_X;
@@ -178,25 +168,6 @@ void cl_launch_kernel() {
   if (errcode != CL_SUCCESS)
     printf("Error in launching kernel\n");
 
-  //  // Set the arguments of the kernel
-  //  errcode = clSetKernelArg(clKernel2, 0, sizeof(cl_mem), (void
-  // *)&a_mem_obj);
-  //  errcode |= clSetKernelArg(clKernel2, 1, sizeof(cl_mem), (void
-  // *)&x2_mem_obj);
-  //  errcode |= clSetKernelArg(clKernel2, 2, sizeof(cl_mem), (void
-  // *)&y2_mem_obj);
-  //  errcode |= clSetKernelArg(clKernel2, 3, sizeof(int), (void *)&n);
-  //  if (errcode != CL_SUCCESS)
-  //    printf("Error in seting arguments\n");
-  //
-  //  // Execute the OpenCL kernel
-  //  errcode =
-  //      clEnqueueNDRangeKernel(clCommandQue, clKernel2, 1, NULL,
-  // globalWorkSize,
-  //                             localWorkSize, 0, NULL, NULL);
-  //  if (errcode != CL_SUCCESS)
-  //    printf("Error in launching kernel\n");
-
   clFinish(clCommandQue);
 }
 
@@ -209,9 +180,7 @@ void cl_clean_up() {
   errcode = clReleaseProgram(clProgram);
   errcode = clReleaseMemObject(a_mem_obj);
   errcode = clReleaseMemObject(x1_mem_obj);
-  errcode = clReleaseMemObject(x2_mem_obj);
   errcode = clReleaseMemObject(y1_mem_obj);
-  errcode = clReleaseMemObject(y2_mem_obj);
   errcode = clReleaseCommandQueue(clCommandQue);
   errcode = clReleaseContext(clGPUContext);
   if (errcode != CL_SUCCESS)
@@ -230,7 +199,7 @@ void runMvt(DATA_TYPE *a, DATA_TYPE *x1, DATA_TYPE *x2, DATA_TYPE *y1,
 
   for (i = 0; i < N; i++) {
     for (int rep = 0; rep < intReps; ++rep) {
-      for (j = 0; j < N; j++) {
+      for (j = 0; j < WIDTH; j++) {
         x1[i] = x1[i] + a[i * N + j] * y1[j];
       }
     }
@@ -259,11 +228,8 @@ int main(void) {
 
   a = (DATA_TYPE *)malloc(N * N * sizeof(DATA_TYPE));
   x1 = (DATA_TYPE *)malloc(N * sizeof(DATA_TYPE));
-  x2 = (DATA_TYPE *)malloc(N * sizeof(DATA_TYPE));
   x1_outputFromGpu = (DATA_TYPE *)malloc(N * sizeof(DATA_TYPE));
-  x2_outputFromGpu = (DATA_TYPE *)malloc(N * sizeof(DATA_TYPE));
   y_1 = (DATA_TYPE *)malloc(N * sizeof(DATA_TYPE));
-  y_2 = (DATA_TYPE *)malloc(N * sizeof(DATA_TYPE));
 
   init_arrays(a, x1, x2, y_1, y_2);
   read_cl_file();
@@ -284,11 +250,8 @@ int main(void) {
 
   free(a);
   free(x1);
-  free(x2);
   free(x1_outputFromGpu);
-  free(x2_outputFromGpu);
   free(y_1);
-  free(y_2);
 
   return 0;
 }

@@ -24,9 +24,18 @@ public:
 
 public:
   InstVector getTids();
+  InstVector getGids();
+  InstVector getGroupIds();
   InstVector getSizes();
+  InstVector getGlobalSizes();
+  InstVector getDivergentIds();
   InstVector getTids(int direction);
+  InstVector getGids(int direction);
+  InstVector getGroupIds(int direction);
   InstVector getSizes(int direction);
+  InstVector getGlobalSizes(int direction);
+  InstVector getDivergentIds(int direction);
+  InstVector getSMemAllocs();
 
   bool isTid(Instruction *inst);
   bool isTidInDirection(Instruction *inst, int direction);
@@ -50,6 +59,10 @@ public:
   bool isGroupId(Instruction *inst, int direction) const;
   bool isGroupsNum(Instruction *inst, int dimension) const;
 
+  Function *getOclFunctionPtr(std::string name) const;
+  void registerOclInst(int direction, std::string name, Instruction *inst);
+  void unregisterOclInst(int direction, std::string name, Instruction *inst);
+
   void dump();
 
 public:
@@ -68,7 +81,11 @@ private:
   void findOpenCLFunctionCallsByNameAllDirs(std::string calleeName,
                                             Function *caller);
 
+  void getAllOpenCLFunctionPtrs(Function *caller);
+  void getExistingOpenCLFunctionPtr(std::string calleeName, Function *caller, std::set<std::string> &unlinked);
+
 private:
+  std::map<std::string, Function *> oclFunctionPointers;
   std::vector<std::map<std::string, InstVector>> oclInsts;
 };
 

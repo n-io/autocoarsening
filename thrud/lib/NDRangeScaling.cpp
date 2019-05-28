@@ -3,15 +3,6 @@
 #include "thrud/DataTypes.h"
 #include "thrud/Utils.h"
 
-// Support functions.
-Instruction *getMulInst(Value *value, unsigned int factor);
-Instruction *getAddInst(Value *value, unsigned int addend);
-Instruction *getAddInst(Value *V1, Value *V2);
-Instruction *getShiftInst(Value *value, unsigned int shift);
-Instruction *getAndInst(Value *value, unsigned int factor);
-Instruction *getDivInst(Value *value, unsigned int divisor);
-Instruction *getModuloInst(Value *value, unsigned int modulo);
-
 //------------------------------------------------------------------------------
 void ThreadCoarsening::scaleNDRange() {
   InstVector InstTids;
@@ -21,21 +12,32 @@ void ThreadCoarsening::scaleNDRange() {
 
 //------------------------------------------------------------------------------
 void ThreadCoarsening::scaleSizes() {
-  InstVector sizeInsts = ndr->getSizes(direction);
+  InstVector sizeInsts = THREAD_LEVEL_COARSENING ? ndr->getSizes(direction) : ndr->getGlobalSizes(direction);
+
+  //errs() << "Size instructions:\n";
+  //dumpVector(sizeInsts);
+  
+  /*if (THREAD_LEVEL_COARSENING)
+    errs() << "Applying thread-level coarsening\n";
+  else 
+    errs() << "Applying block-level coarsening\n";*/
+
   for (InstVector::iterator iter = sizeInsts.begin(), iterEnd = sizeInsts.end();
        iter != iterEnd; ++iter) {
     // Scale size.
     Instruction *inst = *iter;
     Instruction *mul = getMulInst(inst, factor);
     mul->insertAfter(inst);
+    //errs() << "Inserting " << *mul << "\n";
     // Replace uses of the old size with the scaled one.
     replaceUses(inst, mul);
   }
 }
 
 //------------------------------------------------------------------------------
+
 // Scaling function: origTid = [newTid / st] * cf * st + newTid % st + subid * st
-void ThreadCoarsening::scaleIds() {
+void ThreadCoarsening::scaleIdsThreadLevelCoarsening() {
   unsigned int cfst = factor * stride;
 
   InstVector tids = ndr->getTids(direction);
@@ -73,79 +75,95 @@ void ThreadCoarsening::scaleIds() {
   }
 }
 
-// Support functions.
-//------------------------------------------------------------------------------
-unsigned int getIntWidth(Value *value) {
-  Type *type = value->getType();
-  IntegerType *intType = dyn_cast<IntegerType>(type);
-  assert(intType && "Value type is not integer");
-  return intType->getBitWidth();
+void ThreadCoarsening::scaleIds() {
+  if (THREAD_LEVEL_COARSENING) {
+    scaleIdsThreadLevelCoarsening();
+    return;
+  }
+
+  // replace all globalIds with (groupId * localSize + localId)
+  InstVector gids = ndr->getGids(direction);
+
+  /*std::vector<Instruction *> unusedInsts;
+  for (InstVector::iterator instIter = gids.begin(), instEnd = gids.end();
+       instIter != instEnd; ++instIter) {
+    Instruction *inst = *instIter;
+
+    LLVMContext & context = inst->getContext();
+    IntegerType * intType = IntegerType::getInt32Ty(context);
+
+    CallInst *cinst = (CallInst *) inst;
+
+    ConstantInt *cint = dyn_cast<ConstantInt>(cinst->getArgOperand(0));
+
+    //IRBuilder<> builder(inst->getParent());
+    //builder.createCall(ndr->getOclFunctionPtr(NDRange::GET_GROUP_ID), ArrayRef(direction));
+    ////ConstantInt * const param = ConstantInt::get(intType, direction);
+    //ArrayRef<ConstantInt> params(*param);
+    
+    //ArrayRef<Value *> params(ConstantInt::get(intType, direction));
+    //CallInst *groupId = CallInst::Create(ndr->getOclFunctionPtr(NDRange::GET_GROUP_ID), ArrayRef<Value *>(ConstantInt::get(intType, direction)));
+    //std::cout << "Finished\n";
+    
+
+    CallInst *groupId = (CallInst* ) inst->clone();
+
+    groupId->setCalledFunction(ndr->getOclFunctionPtr(NDRange::GET_GROUP_ID));
+    groupId->insertAfter(inst);
+    ndr->registerOclInst(direction, NDRange::GET_GROUP_ID, groupId);
+
+    CallInst *localSize = (CallInst* ) inst->clone();
+    localSize->setCalledFunction(ndr->getOclFunctionPtr(NDRange::GET_LOCAL_SIZE));
+    localSize->insertAfter(groupId);
+    ndr->registerOclInst(direction, NDRange::GET_LOCAL_SIZE, localSize);
+
+    CallInst *localId = (CallInst* ) inst->clone();
+    localId->setCalledFunction(ndr->getOclFunctionPtr(NDRange::GET_LOCAL_ID));
+    localId->insertAfter(localSize);
+    ndr->registerOclInst(direction, NDRange::GET_LOCAL_ID, localId);
+
+    Instruction *mul = getMulInst(groupId, localSize);
+    mul->insertAfter(localId);
+    Instruction *add = getAddInst(mul, localId);
+    add->insertAfter(mul);
+
+    replaceUses(inst, add);
+    
+    ndr->unregisterOclInst(direction, NDRange::GET_GLOBAL_ID, inst);
+    errs () << "(NDRangeScaling) Trying to remove inst from parent >> " << *inst << "\n";
+    unusedInsts.push_back(inst); 
+    //inst->removeFromParent();
+  }
+  for (auto it = unusedInsts.begin(); it != unusedInsts.end(); ++it) {
+    Instruction *inst = *it;
+    inst->eraseFromParent();
+  }*/
+  //scaleIds2();
+  // replace all groupIds with (cf * groupId + i)
+  InstVector groupIds = ndr->getGroupIds(direction); 
+  for (InstVector::iterator instIter = groupIds.begin(), instEnd = groupIds.end();
+       instIter != instEnd; ++instIter) {
+    Instruction *inst = *instIter;
+    Instruction *base = getMulInst(inst, factor);
+    base->insertAfter(inst);
+    replaceUses(inst, base);
+    base->setOperand(0, inst);
+   
+    cMap.insert(std::pair<Instruction *, InstVector>(inst, InstVector()));
+    InstVector &current = cMap[base];
+    current.reserve(factor - 1);
+
+    Instruction *bookmark = base;
+    for (unsigned int index = 2; index <= factor; ++index) {
+      Instruction *add = getAddInst(base, (index - 1));
+      //errs() << "Creating instruction for cf " << (index - 1) << " >> " << *add << "\n";
+      add->insertAfter(bookmark);
+      current.push_back(add);
+      bookmark = add;
+    }
+
+  }
+  //dumpCoarseningMap(cMap);
 }
 
-ConstantInt *getConstantInt(unsigned int value, unsigned int width,
-                            LLVMContext &context) {
-  IntegerType *integer = IntegerType::get(context, width);
-  return ConstantInt::get(integer, value);
-}
-
-Instruction *getMulInst(Value *value, unsigned int factor) {
-  unsigned int width = getIntWidth(value);
-  ConstantInt *factorValue = getConstantInt(factor, width, value->getContext());
-  Instruction *mul =
-      BinaryOperator::Create(Instruction::Mul, value, factorValue);
-  mul->setName(value->getName() + ".." + Twine(factor));
-  return mul;
-}
-
-Instruction *getAddInst(Value *value, unsigned int addend) {
-  unsigned int width = getIntWidth(value);
-  ConstantInt *addendValue = getConstantInt(addend, width, value->getContext());
-  Instruction *add =
-      BinaryOperator::Create(Instruction::Add, value, addendValue);
-  add->setName(value->getName() + ".." + Twine(addend));
-  return add;
-}
-
-Instruction *getAddInst(Value *firstValue, Value *secondValue) {
-  Instruction *add =
-      BinaryOperator::Create(Instruction::Add, firstValue, secondValue);
-  add->setName(firstValue->getName() + "..Add");
-  return add;
-}
-
-Instruction *getShiftInst(Value *value, unsigned int shift) {
-  unsigned int width = getIntWidth(value);
-  ConstantInt *intValue = getConstantInt(shift, width, value->getContext());
-  Instruction *shiftInst =
-      BinaryOperator::Create(Instruction::LShr, value, intValue);
-  shiftInst->setName(Twine(value->getName()) + "..Shift");
-  return shiftInst;
-}
-
-Instruction *getAndInst(Value *value, unsigned int factor) {
-  unsigned int width = getIntWidth(value);
-  ConstantInt *intValue = getConstantInt(factor, width, value->getContext());
-  Instruction *andInst =
-      BinaryOperator::Create(Instruction::And, value, intValue);
-  andInst->setName(Twine(value->getName()) + "..And");
-  return andInst;
-}
-
-Instruction *getDivInst(Value *value, unsigned int divisor) {
-  unsigned int width = getIntWidth(value);
-  ConstantInt *intValue = getConstantInt(divisor, width, value->getContext());
-  Instruction *divInst = 
-    BinaryOperator::Create(Instruction::UDiv, value, intValue);
-  divInst->setName(Twine(value->getName()) + "..Div");
-  return divInst;
-}
-
-Instruction *getModuloInst(Value *value, unsigned int modulo) {
-  unsigned int width = getIntWidth(value);
-  ConstantInt *intValue = getConstantInt(modulo, width, value->getContext());
-  Instruction *moduloInst = 
-    BinaryOperator::Create(Instruction::URem, value, intValue);
-  moduloInst->setName(Twine(value->getName()) + "..Rem");
-  return moduloInst;
-}
 

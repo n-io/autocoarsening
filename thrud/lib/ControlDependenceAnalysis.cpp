@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <numeric>
 
 ControlDependenceAnalysis::ControlDependenceAnalysis() : FunctionPass(ID) {}
 

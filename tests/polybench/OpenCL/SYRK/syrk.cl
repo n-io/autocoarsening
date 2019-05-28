@@ -13,7 +13,7 @@
 #pragma OPENCL EXTENSION cl_amd_fp64 : enable
 #endif
 
-typedef float DATA_TYPE;
+typedef double DATA_TYPE;
 
 
 /*  C := alpha*A*A' + beta*C */

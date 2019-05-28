@@ -29,6 +29,8 @@ public:
 // Public methods.
 //------------------------------------------------------------------------------
 public:
+  void copyBuffer(const Buffer& src, const Buffer& dest, size_t size);
+
   void readBuffer(const Buffer& buffer, size_t size, void* pointer);
   void readBuffer(const Buffer& buffer, size_t size, void* pointer, 
                   Event& event);

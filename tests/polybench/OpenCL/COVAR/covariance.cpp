@@ -30,8 +30,8 @@
 #define MAX_SOURCE_SIZE (0x100000)
 
 /* Problem size */
-#define M 512 
-#define N 512 
+#define M 15*512 
+#define N 15*512 
 
 /* Thread block dimensions for kernel 1*/
 #define DIM_LOCAL_WORK_GROUP_KERNEL_1_X 256
@@ -42,8 +42,8 @@
 #define DIM_LOCAL_WORK_GROUP_KERNEL_2_Y 8
 
 /* Thread block dimensions for kernel 3*/
-#define DIM_LOCAL_WORK_GROUP_KERNEL_3_X 256
-#define DIM_LOCAL_WORK_GROUP_KERNEL_3_Y 1
+#define DIM_LOCAL_WORK_GROUP_KERNEL_3_X 32
+#define DIM_LOCAL_WORK_GROUP_KERNEL_3_Y 8
 
 #define sqrt_of_array_cell(x,j) sqrt(x[j])
 
@@ -192,7 +192,7 @@ void cl_launch_kernel()
 	localWorkSize_Kernel3[0] = DIM_LOCAL_WORK_GROUP_KERNEL_3_X;
 	localWorkSize_Kernel3[1] = DIM_LOCAL_WORK_GROUP_KERNEL_3_Y;
 	globalWorkSize_Kernel3[0] = (size_t)ceil(((float)M) / ((float)DIM_LOCAL_WORK_GROUP_KERNEL_3_X)) * DIM_LOCAL_WORK_GROUP_KERNEL_3_X;
-	globalWorkSize_Kernel3[1] = 1;
+	globalWorkSize_Kernel3[1] = (size_t)ceil(((float)N) / ((float)DIM_LOCAL_WORK_GROUP_KERNEL_3_Y)) * DIM_LOCAL_WORK_GROUP_KERNEL_3_Y;;
 
 	// Set the arguments of the kernel
 	errcode =  clSetKernelArg(clKernel_mean, 0, sizeof(cl_mem), (void *)&mean_mem_obj);
@@ -324,8 +324,8 @@ int main(void)
 	errcode = clEnqueueReadBuffer(clCommandQue, symmat_mem_obj, CL_TRUE, 0, (M+1) * (N+1) * sizeof(DATA_TYPE), symmat_outputFromGpu, 0, NULL, NULL);
 	if(errcode != CL_SUCCESS) printf("Error in reading GPU mem\n");   
 
-	covariance(data, symmat, mean);
-	compareResults(symmat, symmat_outputFromGpu);
+	//covariance(data, symmat, mean);
+	//compareResults(symmat, symmat_outputFromGpu);
 	cl_clean_up();
 	
 	free(data);

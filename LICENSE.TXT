@@ -61,4 +61,4 @@ licenses, and/or restrictions:
 
 Program             Directory
 -------             ---------
-Polybench           coarsening_pass/tests/polybench
+Polybench           autocoarsening/tests/polybench

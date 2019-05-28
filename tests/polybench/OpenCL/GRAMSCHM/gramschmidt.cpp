@@ -32,7 +32,7 @@
 
 /* Problem size */
 #define M_DEFAULT 1024 
-#define N_DEFAULT 1024 
+#define N_DEFAULT 120*1024
 
 /* Thread block dimensions */
 #define DIM_THREAD_BLOCK_X 256

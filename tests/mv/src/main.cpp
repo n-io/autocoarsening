@@ -17,7 +17,7 @@
 #include "bench_support.h"
 
 //-----------------------------------------------------------------------------
-constexpr int SIZE = 512;
+constexpr int SIZE = 60*512;
 std::vector<size_t> globalWorkSize = { SIZE };
 std::vector<size_t> localWorkSize = { 128 };
 

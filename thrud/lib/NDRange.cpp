@@ -1,5 +1,9 @@
 #include "thrud/NDRange.h"
 
+#include "llvm/IR/Module.h"
+#include "llvm/IR/GlobalVariable.h"
+#include "thrud/Utils.h"
+
 std::string NDRange::GET_GLOBAL_ID = "get_global_id";
 std::string NDRange::GET_LOCAL_ID = "get_local_id";
 std::string NDRange::GET_GLOBAL_SIZE = "get_global_size";
@@ -15,6 +19,7 @@ void NDRange::getAnalysisUsage(AnalysisUsage &au) const {
 }
 
 bool NDRange::runOnFunction(Function &function) {
+
   Function *functionPtr = (Function *)&function;
   init();
   findOpenCLFunctionCallsByNameAllDirs(GET_GLOBAL_ID, functionPtr);
@@ -23,6 +28,9 @@ bool NDRange::runOnFunction(Function &function) {
   findOpenCLFunctionCallsByNameAllDirs(GET_LOCAL_SIZE, functionPtr);
   findOpenCLFunctionCallsByNameAllDirs(GET_GROUP_ID, functionPtr);
   findOpenCLFunctionCallsByNameAllDirs(GET_GROUPS_NUMBER, functionPtr);
+
+  getAllOpenCLFunctionPtrs(functionPtr);
+
   return false;
 }
 
@@ -39,6 +47,26 @@ InstVector NDRange::getTids() {
   return result;
 }
 
+InstVector NDRange::getGids() {
+  InstVector result;
+  for (int direction = 0; direction < DIRECTION_NUMBER; ++direction) {
+    std::map<std::string, InstVector> &dirInsts = oclInsts[direction];
+    InstVector globalIds = dirInsts[GET_GLOBAL_ID];
+    result.insert(result.end(), globalIds.begin(), globalIds.end());
+  }
+  return result;
+}
+
+InstVector NDRange::getGroupIds() {
+  InstVector result;
+  for (int direction = 0; direction < DIRECTION_NUMBER; ++direction) {
+    std::map<std::string, InstVector> &dirInsts = oclInsts[direction];
+    InstVector groupIds = dirInsts[GET_GROUP_ID];
+    result.insert(result.end(), groupIds.begin(), groupIds.end());
+  }
+  return result;
+}
+
 InstVector NDRange::getSizes() {
   InstVector result;
   for (int direction = 0; direction < DIRECTION_NUMBER; ++direction) {
@@ -51,6 +79,26 @@ InstVector NDRange::getSizes() {
   return result;
 }
 
+InstVector NDRange::getGlobalSizes() {
+  InstVector result;
+  for (int direction = 0; direction < DIRECTION_NUMBER; ++direction) {
+    std::map<std::string, InstVector> &dirInsts = oclInsts[direction];
+    InstVector globalSizes = dirInsts[GET_GLOBAL_SIZE];
+    InstVector groupsNum = dirInsts[GET_GROUPS_NUMBER];
+    result.insert(result.end(), globalSizes.begin(), globalSizes.end());
+    result.insert(result.end(), groupsNum.begin(), groupsNum.end());
+  }
+  return result;
+}
+
+InstVector NDRange::getDivergentIds() {
+  if (THREAD_LEVEL_COARSENING) {
+    return getTids();
+  } else {
+    return getGroupIds();
+  }
+}
+
 InstVector NDRange::getTids(int direction) {
   InstVector result;
   std::map<std::string, InstVector> &dirInsts = oclInsts[direction];
@@ -58,6 +106,22 @@ InstVector NDRange::getTids(int direction) {
   InstVector localIds = dirInsts[GET_LOCAL_ID];
   result.insert(result.end(), globalIds.begin(), globalIds.end());
   result.insert(result.end(), localIds.begin(), localIds.end());
+  return result;
+}
+
+InstVector NDRange::getGids(int direction) {
+  InstVector result;
+  std::map<std::string, InstVector> &dirInsts = oclInsts[direction];
+  InstVector globalIds = dirInsts[GET_GLOBAL_ID];
+  result.insert(result.end(), globalIds.begin(), globalIds.end());
+  return result;
+}
+
+InstVector NDRange::getGroupIds(int direction) {
+  InstVector result;
+  std::map<std::string, InstVector> &dirInsts = oclInsts[direction];
+  InstVector groupIds = dirInsts[GET_GROUP_ID];
+  result.insert(result.end(), groupIds.begin(), groupIds.end());
   return result;
 }
 
@@ -69,6 +133,24 @@ InstVector NDRange::getSizes(int direction) {
   result.insert(result.end(), globalSizes.begin(), globalSizes.end());
   result.insert(result.end(), localSizes.begin(), localSizes.end());
   return result;
+}
+
+InstVector NDRange::getGlobalSizes(int direction) {
+  InstVector result;
+  std::map<std::string, InstVector> &dirInsts = oclInsts[direction];
+  InstVector globalSizes = dirInsts[GET_GLOBAL_SIZE];
+  InstVector groupsNum = dirInsts[GET_GROUPS_NUMBER];
+  result.insert(result.end(), globalSizes.begin(), globalSizes.end());
+  result.insert(result.end(), groupsNum.begin(), groupsNum.end());
+  return result;
+}
+
+InstVector NDRange::getDivergentIds(int direction) {
+  if (THREAD_LEVEL_COARSENING) {
+    return getTids(direction);
+  } else {
+    return getGroupIds(direction);
+  }
 }
 
 bool NDRange::isTid(Instruction *inst) {
@@ -196,6 +278,25 @@ bool NDRange::isGroupsNum(Instruction *inst, int direction) const {
   return isPresentInDirection(inst, GET_GROUPS_NUMBER, direction);
 }
 
+Function *NDRange::getOclFunctionPtr(std::string name) const {
+  return oclFunctionPointers.find(name)->second;
+}
+
+void NDRange::registerOclInst(int direction, std::string name, Instruction *inst) {
+  std::map<std::string, InstVector> &dirInsts = oclInsts[direction];
+  InstVector &insts = dirInsts[name];
+  insts.push_back(inst);
+}
+
+void NDRange::unregisterOclInst(int direction, std::string name, Instruction *inst) {
+  std::map<std::string, InstVector> &dirInsts = oclInsts[direction];
+  InstVector &insts = dirInsts[name];
+  auto pos = std::find(insts.begin(), insts.end(), inst);
+  if (pos != insts.end()) {
+    insts.erase(pos);
+  }
+}
+
 void NDRange::dump() {
   for (int direction = 0; direction < DIRECTION_NUMBER; ++direction) {
     std::map<std::string, InstVector> &dirInsts = oclInsts[direction];
@@ -251,6 +352,35 @@ void NDRange::findOpenCLFunctionCallsByNameAllDirs(std::string calleeName,
     std::map<std::string, InstVector> &dirInsts = oclInsts[direction];
     InstVector &insts = dirInsts[calleeName];
     findOpenCLFunctionCallsByName(calleeName, caller, direction, insts);
+  }
+}
+
+void NDRange::getAllOpenCLFunctionPtrs(Function *caller) {
+
+  std::set<std::string> unlinked;
+
+  getExistingOpenCLFunctionPtr(GET_GLOBAL_ID,     caller, unlinked);
+  getExistingOpenCLFunctionPtr(GET_LOCAL_ID,      caller, unlinked);
+  getExistingOpenCLFunctionPtr(GET_GLOBAL_SIZE,   caller, unlinked);
+  getExistingOpenCLFunctionPtr(GET_LOCAL_SIZE,    caller, unlinked);
+  getExistingOpenCLFunctionPtr(GET_GROUP_ID,      caller, unlinked);
+  getExistingOpenCLFunctionPtr(GET_GROUPS_NUMBER, caller, unlinked);
+
+  Function *firstFunc = oclFunctionPointers.begin()->second;
+
+  for (std::set<std::string>::iterator it = unlinked.begin(); it != unlinked.end(); ++it) {
+    //Function *createOpenCLFunction(std::string calleeName, Function *caller, AttributeSet attributes);
+    std::string calleeName = *it;
+    oclFunctionPointers[calleeName] = createOpenCLFunction(calleeName, caller, firstFunc->getAttributes());
+  }
+}
+
+void NDRange::getExistingOpenCLFunctionPtr(std::string calleeName, Function *caller, std::set<std::string> &unlinked) {
+  Function *callee = getOpenCLFunctionByName(calleeName, caller);
+  if (callee == nullptr) {
+    unlinked.insert(calleeName);
+  } else {
+    oclFunctionPointers[calleeName] = callee;
   }
 }
 

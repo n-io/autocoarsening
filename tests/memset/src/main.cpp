@@ -19,7 +19,7 @@
 //-----------------------------------------------------------------------------
 constexpr int SIZE = 1024;
 const float CONSTANT = 3.14f;
-std::vector<size_t> globalWorkSize = { SIZE, SIZE };
+std::vector<size_t> globalWorkSize = { 3*SIZE, 5*SIZE };
 std::vector<size_t> localWorkSize = { 16, 16 };
 
 const std::string kernelFileName = "memset.cl";

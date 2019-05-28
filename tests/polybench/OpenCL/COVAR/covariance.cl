@@ -50,17 +50,17 @@ __kernel void covar_kernel(__global DATA_TYPE *symmat, __global DATA_TYPE *data,
 	int j1 = get_global_id(0) + 1;
 	int i, j2;
 
-	if ((j1 >= 1) && (j1 < (m+1)))
+	if ((j1 >= 1) && (j1 < (m+1)) && (j2 >= j1) && (j2 < (m+1)))
 	{
-		for (j2 = j1; j2 < (m+1); j2++)
-		{		
+		//for (j2 = j1; j2 < (m+1); j2++)
+		//{		
 	      		symmat[j1*(m+1) + j2] = 0.0;
 			for(i = 1; i < (n+1); i++)
 			{
 				symmat[j1 * (m+1) + j2] += data[i *(m+1) + j1] * data[i *(m+1) + j2];
 			}
 			symmat[j2 * (m+1) + j1] = symmat[j1 * (m+1) + j2];
-		}
+		//}
 	}
 }
 

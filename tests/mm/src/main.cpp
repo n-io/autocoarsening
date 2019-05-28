@@ -17,8 +17,9 @@
 #include "bench_support.h"
 
 //-----------------------------------------------------------------------------
-constexpr int SIZE = 256;
-std::vector<size_t> globalWorkSize = { SIZE, SIZE };
+constexpr int WIDTH = 256;
+constexpr int HEIGHT = 30*256;
+std::vector<size_t> globalWorkSize = { HEIGHT, HEIGHT };
 std::vector<size_t> localWorkSize = { 16, 16 };
 
 const std::string kernelFileName = "mm.cl";
@@ -136,15 +137,15 @@ void hostMemoryAlloc() {
 
   aHost.assign(bufferSize, 0.f);
   bHost.assign(bufferSize, 0.f);
-  std::generate_n(aHost.begin(), bufferSize, [&] {
+  std::generate_n(aHost.begin(), WIDTH*HEIGHT, [&] {
     return (distribution(gen));
   });
-  std::generate_n(bHost.begin(), bufferSize, [&] {
+  std::generate_n(bHost.begin(), HEIGHT*WIDTH, [&] {
     return (distribution(gen));
   });
   outputHost.assign(bufferSize, 0.f);
-  width = new cl_int(globalWorkSize[0]);
-  height = new cl_int(globalWorkSize[1]);
+  width = new cl_int(WIDTH);
+  height = new cl_int(HEIGHT);
 }
 
 //-----------------------------------------------------------------------------
@@ -192,15 +193,15 @@ void run(Queue &queue) {
 
 //-----------------------------------------------------------------------------
 void verify() {
-  float* cpuHostC = new float [SIZE * SIZE];
-  for(unsigned int row = 0; row < SIZE; ++row) {
-    for(unsigned int column = 0; column < SIZE; ++column) {
-      cpuHostC[row * SIZE + column] = 0.0f;
-      for(unsigned int index = 0; index < SIZE; ++index) 
-        cpuHostC[row * SIZE + column] += aHost[row * SIZE + index] * 
-                                         bHost[index * SIZE + column];
+  float* cpuHostC = new float [HEIGHT * HEIGHT];
+  for(unsigned int row = 0; row < HEIGHT; ++row) {
+    for(unsigned int column = 0; column < HEIGHT; ++column) {
+      cpuHostC[row * HEIGHT + column] = 0.0f;
+      for(unsigned int index = 0; index < WIDTH; ++index) 
+        cpuHostC[row * HEIGHT + column] += aHost[row * WIDTH + index] * 
+                                         bHost[index * HEIGHT + column];
 
-      if(abs(outputHost[row * SIZE + column] - cpuHostC[row * SIZE + column]) 
+      if(abs(outputHost[row * HEIGHT + column] - cpuHostC[row * HEIGHT + column]) 
          >= 0.001f) {
         std::cout << "Error in the computation:";
         exit(1);

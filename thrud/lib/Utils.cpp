@@ -16,6 +16,8 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/GlobalValue.h"
 
 #include "llvm/Support/raw_ostream.h"
 
@@ -23,6 +25,7 @@
 #include "llvm/Transforms/Utils/Cloning.h"
 
 #include <algorithm>
+#include <stdlib.h>
 
 // OpenCL function names.
 const char *BARRIER = "barrier";
@@ -43,6 +46,10 @@ bool isInLoop(const BasicBlock *block, LoopInfo *loopInfo) {
   return loopInfo->getLoopFor(block) != nullptr;
 }
 
+//------------------------------------------------------------------------------
+bool isSharedMemAddressSpace(unsigned addressSpace) {
+  return addressSpace == 3;
+}
 //------------------------------------------------------------------------------
 bool isKernel(const Function *function) {
   const Module *module = function->getParent();
@@ -379,10 +386,27 @@ Function *getOpenCLFunctionByName(std::string calleeName, Function *caller) {
   Module &module = *caller->getParent();
   Function *callee = module.getFunction(calleeName);
 
-  if (callee == nullptr)
+  if (callee == nullptr) {
+    /*errs() << "Could not find function " << calleeName << ", creating new one\n";
+    FunctionType * ftype = FunctionType::get(llvm::Type::getInt32Ty(llvm::getGlobalContext()),
+                               ArrayRef<Type *>(llvm::Type::getInt32Ty(llvm::getGlobalContext())), false); 
+    callee = Function::Create(ftype, GlobalValue::LinkageTypes::ExternalLinkage, calleeName, &module);*/
+    
     return nullptr;
+  }
 
   assert(callee->arg_size() == 1 && "Wrong OpenCL function");
+  return callee;
+}
+
+Function *createOpenCLFunction(std::string calleeName, Function *caller, AttributeSet attributes) {
+  Module &module = *caller->getParent();
+  FunctionType * ftype = FunctionType::get(llvm::Type::getInt32Ty(llvm::getGlobalContext()),
+			     ArrayRef<Type *>(llvm::Type::getInt32Ty(llvm::getGlobalContext())), false); 
+  Function *callee = Function::Create(ftype, GlobalValue::LinkageTypes::ExternalLinkage, calleeName, &module);
+  
+  callee->setAttributes(attributes);
+
   return callee;
 }
 
@@ -633,4 +657,95 @@ bool isPresent(const Instruction *inst, std::vector<BlockVector *> &value) {
     if (isPresent(inst, **Iter))
       return true;
   return false;
+}
+
+// IR Support functions.
+//------------------------------------------------------------------------------
+unsigned int getIntWidth(Value *value) {
+  Type *type = value->getType();
+  IntegerType *intType = dyn_cast<IntegerType>(type);
+  assert(intType && "Value type is not integer");
+  return intType->getBitWidth();
+}
+
+ConstantInt *getConstantInt(unsigned int value, unsigned int width,
+                            LLVMContext &context) {
+  IntegerType *integer = IntegerType::get(context, width);
+  return ConstantInt::get(integer, value);
+}
+
+Instruction *getMulInst(Value *value, unsigned int factor) {
+  unsigned int width = getIntWidth(value);
+  ConstantInt *factorValue = getConstantInt(factor, width, value->getContext());
+  Instruction *mul =
+      BinaryOperator::Create(Instruction::Mul, value, factorValue);
+  mul->setName(value->getName() + ".." + Twine(factor));
+  return mul;
+}
+
+Instruction *getMulInst(Value *firstValue, Value *secondValue) {
+  Instruction *mul =
+      BinaryOperator::Create(Instruction::Mul, firstValue, secondValue);
+  mul->setName(firstValue->getName() + "..Mul");
+  return mul;
+}
+
+
+Instruction *getAddInst(Value *value, unsigned int addend) {
+  unsigned int width = getIntWidth(value);
+  ConstantInt *addendValue = getConstantInt(addend, width, value->getContext());
+  Instruction *add =
+      BinaryOperator::Create(Instruction::Add, value, addendValue);
+  add->setName(value->getName() + ".." + Twine(addend));
+  return add;
+}
+
+Instruction *getAddInst(Value *firstValue, Value *secondValue) {
+  Instruction *add =
+      BinaryOperator::Create(Instruction::Add, firstValue, secondValue);
+  add->setName(firstValue->getName() + "..Add");
+  return add;
+}
+
+Instruction *getShiftInst(Value *value, unsigned int shift) {
+  unsigned int width = getIntWidth(value);
+  ConstantInt *intValue = getConstantInt(shift, width, value->getContext());
+  Instruction *shiftInst =
+      BinaryOperator::Create(Instruction::LShr, value, intValue);
+  shiftInst->setName(Twine(value->getName()) + "..Shift");
+  return shiftInst;
+}
+
+Instruction *getAndInst(Value *value, unsigned int factor) {
+  unsigned int width = getIntWidth(value);
+  ConstantInt *intValue = getConstantInt(factor, width, value->getContext());
+  Instruction *andInst =
+      BinaryOperator::Create(Instruction::And, value, intValue);
+  andInst->setName(Twine(value->getName()) + "..And");
+  return andInst;
+}
+
+Instruction *getDivInst(Value *value, unsigned int divisor) {
+  unsigned int width = getIntWidth(value);
+  ConstantInt *intValue = getConstantInt(divisor, width, value->getContext());
+  Instruction *divInst = 
+    BinaryOperator::Create(Instruction::UDiv, value, intValue);
+  divInst->setName(Twine(value->getName()) + "..Div");
+  return divInst;
+}
+
+Instruction *getModuloInst(Value *value, unsigned int modulo) {
+  unsigned int width = getIntWidth(value);
+  ConstantInt *intValue = getConstantInt(modulo, width, value->getContext());
+  Instruction *moduloInst = 
+    BinaryOperator::Create(Instruction::URem, value, intValue);
+  moduloInst->setName(Twine(value->getName()) + "..Rem");
+  return moduloInst;
+}
+
+// System Utils
+//------------------------------------------------------------------------------
+std::string getEnvString(const char *name, const char *defValue) {
+  char *val = getenv(name);
+  return std::string(val ? val : defValue);
 }

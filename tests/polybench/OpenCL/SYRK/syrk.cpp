@@ -31,8 +31,8 @@
 #define MAX_SOURCE_SIZE (0x100000)
 
 /* Problem size */
-#define N_DEFAULT 128 
-#define M_DEFAULT 128 
+#define N_DEFAULT 30*128 
+#define M_DEFAULT 30*128 
 
 /* Thread block dimensions */
 #define DIM_LOCAL_WORK_GROUP_X 32
@@ -45,7 +45,7 @@
 #endif
 
 /* Can switch DATA_TYPE between float and double */
-typedef float DATA_TYPE;
+typedef double DATA_TYPE;
 
 char str_temp[1024];
 
@@ -197,8 +197,8 @@ void syrk(DATA_TYPE *A, DATA_TYPE *C, DATA_TYPE *result) {
     intReps = atoi(reps);
   }
 
-  for (i = 0; i < 128; i++) {
-    for (j = 0; j < 128; j++) {
+  for (i = 0; i < N; i++) {
+    for (j = 0; j < M; j++) {
       for (int rep = 0; rep < intReps; ++rep) {
         C[i * M + j] *= beta;
         for (k = 0; k < M; k++) {

@@ -12,6 +12,19 @@ void ThreadCoarsening::coarsenFunction() {
   RegionVector &regions = sdda->getOutermostDivRegions();
   InstVector &insts = sdda->getOutermostDivInsts();
 
+  // Replicate shMem held in global vars.
+  if (!THREAD_LEVEL_COARSENING) {
+    Function *f = !insts.empty() ? insts[0]->getParent()->getParent() : nullptr;
+    if (f == nullptr) {
+      errs() << "Could not obtain function ptr from div insts\n";
+      return;
+    }
+    shMemGlobals = sdda->getShMemGlobalsUsedIn(f);
+
+    std::for_each(shMemGlobals.begin(), shMemGlobals.end(),
+		  [this](GlobalVariable *gv) { replicateGlobal(gv); });
+  }
+
   // Replicate instructions.
   std::for_each(insts.begin(), insts.end(),
                 [this](Instruction *inst) { replicateInst(inst); });
@@ -19,6 +32,24 @@ void ThreadCoarsening::coarsenFunction() {
   // Replicate regions.
   std::for_each(regions.begin(), regions.end(),
                 [this](DivergentRegion *region) { replicateRegion(region); });
+}
+
+//------------------------------------------------------------------------------
+void ThreadCoarsening::replicateGlobal(GlobalVariable *gv) {
+  for (unsigned int index = 0; index < factor - 1; ++index) {
+    Module &module = *(gv->getParent());
+    GlobalVariable *newGV = new GlobalVariable(module,
+                                               gv->getType()->getPointerElementType(),
+                                               gv->isConstant(),
+                                               gv->getLinkage(),
+                                               gv->getInitializer(),
+                                               gv->getName() + "..cf" + Twine(index + 2), //TODO
+                                               (GlobalVariable *) nullptr,
+                                               gv->getThreadLocalMode(),
+                                               gv->getType()->getAddressSpace());
+    newGV->copyAttributesFrom(gv);
+    shMemGlobalsCMap[gv].push_back(newGV);
+  }
 }
 
 //------------------------------------------------------------------------------
@@ -79,12 +110,31 @@ void ThreadCoarsening::applyCoarseningMap(Instruction *inst,
   for (unsigned int opIndex = 0, opEnd = inst->getNumOperands();
        opIndex != opEnd; ++opIndex) {
     Instruction *operand = dyn_cast<Instruction>(inst->getOperand(opIndex));
-    if (operand == nullptr)
-      continue;
-    Instruction *newOp = getCoarsenedInstruction(operand, index);
-    if (newOp == nullptr)
-      continue;
-    inst->setOperand(opIndex, newOp);
+    if (operand != nullptr) {
+      Instruction *newOp = getCoarsenedInstruction(operand, index);
+      if (newOp == nullptr)
+	continue;
+      inst->setOperand(opIndex, newOp);
+    } else if (!THREAD_LEVEL_COARSENING) {
+      if (GlobalVariable *gv = dyn_cast<GlobalVariable>(inst->getOperand(opIndex))) {
+	if (shMemGlobals.find(gv) != shMemGlobals.end()) {
+	  GlobalVariable *divGV = shMemGlobalsCMap[gv][index];
+	  inst->setOperand(opIndex, divGV);
+	}
+      } else if (LoadInst *loadInst = dyn_cast<LoadInst>(inst)) {
+	if (isSharedMemAddressSpace(loadInst->getPointerAddressSpace())) {
+	  if (ConstantExpr *ptrOp = dyn_cast<ConstantExpr>(loadInst->getPointerOperand())) {
+	    if (GlobalVariable *gv = dyn_cast<GlobalVariable>(ptrOp->getOperand(0))) {
+	      if (shMemGlobals.find(gv) != shMemGlobals.end()) {
+		GlobalVariable *divGV = shMemGlobalsCMap[gv][index];
+		Constant *newOp = ptrOp->getWithOperandReplaced(0, divGV);
+		loadInst->setOperand(0, newOp);
+	      }
+	    }
+	  }
+	}
+      }
+    }
   }
 }
 

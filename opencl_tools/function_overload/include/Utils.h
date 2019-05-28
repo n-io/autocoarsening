@@ -7,12 +7,14 @@
 #define OCL_BLOCK_SIZE_Y "OCL_BLOCK_SIZE_Y"
 #define OCL_COMPILER "OCL_COMPILER"
 #define OCL_COMPILER_OPTIONS "OCL_COMPILER_OPTIONS"
+#define TC_KERNEL_NAME "TC_KERNEL_NAME"
 #define OCL_REPETITIONS "OCL_REPETITIONS"
 #define CLC_DIRECTORY "/home/s1158370/src/libclc/"
 #define OCL_INPUT_FILE "/tmp/ocl_input.cl"
 #define OCL_OUTPUT_FILE "/tmp/ocl_output.cl"
 #define PTX_FILE "/tmp/tmp.ptx"
 #define BC_FILE "/tmp/bc.ll"
+#define CLR_FILE "/tmp/clr.ll"
 
 //------------------------------------------------------------------------------
 // Runtime function prototypes.
@@ -169,7 +171,7 @@ void enqueueKernelNoTime(cl_command_queue command_queue,
 int compileWithAxtor(std::string &inputFile, 
                      std::string &clangOptions, std::string &optOptions, 
                      std::string &outputFile,
-                     int seed);
+                     int seed, bool cacheDependenceAnalysis);
 
 std::string buildPTXCommandLine(std::string &inputFile,
                                 std::string &compilerOptions,

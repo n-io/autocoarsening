@@ -9,6 +9,7 @@
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/ValueMap.h"
+#include "llvm/IR/InstIterator.h"
 
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/Analysis/ScalarEvolution.h"
@@ -28,6 +29,8 @@ extern const char *BARRIER;
 bool isInLoop(const Instruction &inst, LoopInfo *loopInfo);
 bool isInLoop(const Instruction *inst, LoopInfo *loopInfo);
 bool isInLoop(const BasicBlock *block, LoopInfo *loopInfo);
+
+bool isSharedMemAddressSpace(unsigned addressSpace);
 
 // OpenCL management.
 bool isKernel(const Function *function);
@@ -116,6 +119,7 @@ void dumpIntVector(const std::vector<int> &toDump);
 // Divergence Utils.
 
 Function *getOpenCLFunctionByName(std::string calleeName, Function *caller);
+Function *createOpenCLFunction(std::string calleeName, Function *caller, AttributeSet attributes);
 
 //------------------------------------------------------------------------------
 bool isBarrier(Instruction *inst);
@@ -131,5 +135,21 @@ bool isUsedOutsideOfDefiningBlock(const Instruction *inst);
 Instruction *findFirstUser(Instruction *inst);
 Instruction *findLastUser(Instruction *inst);
 InstVector findUsers(llvm::Value *value);
+
+// IR Support Functions
+unsigned int getIntWidth(Value *value);
+ConstantInt *getConstantInt(unsigned int value, unsigned int width, LLVMContext &context);
+Instruction *getMulInst(Value *value, unsigned int factor);
+Instruction *getMulInst(Value *firstValue, Value *secondValue);
+Instruction *getAddInst(Value *value, unsigned int addend);
+Instruction *getAddInst(Value *firstValue, Value *secondValue);
+Instruction *getShiftInst(Value *value, unsigned int shift);
+Instruction *getAndInst(Value *value, unsigned int factor);
+Instruction *getDivInst(Value *value, unsigned int divisor);
+Instruction *getModuloInst(Value *value, unsigned int modulo);
+
+// System Utils
+std::string getEnvString(const char *name, const char *defValue);
+static bool THREAD_LEVEL_COARSENING = !(getEnvString("THREAD_LEVEL_COARSENING", "").empty());
 
 #endif

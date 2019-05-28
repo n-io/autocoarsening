@@ -36,7 +36,7 @@ Program::~Program() throw () {
 //------------------------------------------------------------------------------
 void Program::createFromSource(const std::string& sourceFile) {
   std::string sourceString = readFile(sourceFile);
-  sourceString += '\0';
+  //sourceString += '\0';
   const char* sourceData = sourceString.data();
   size_t sourceSize = sourceString.length();
 

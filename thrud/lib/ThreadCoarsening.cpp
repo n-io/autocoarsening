@@ -5,6 +5,7 @@
 #include "thrud/DataTypes.h"
 #include "thrud/NDRange.h"
 #include "thrud/Utils.h"
+#include "thrud/ReplaceGlobalIds.h"
 
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -60,6 +61,7 @@ ThreadCoarsening::ThreadCoarsening() : FunctionPass(ID) {}
 
 //------------------------------------------------------------------------------
 void ThreadCoarsening::getAnalysisUsage(AnalysisUsage &au) const {
+  au.addPreserved<ReplaceGlobalIds>();
   au.addRequired<LoopInfo>();
   au.addRequired<SingleDimDivAnalysis>();
   au.addRequired<PostDominatorTree>();
@@ -104,6 +106,7 @@ void ThreadCoarsening::init() {
   cMap.clear();
   phMap.clear();
   phReplacementMap.clear();
+  shMemGlobalsCMap.clear();
 }
 
 //------------------------------------------------------------------------------

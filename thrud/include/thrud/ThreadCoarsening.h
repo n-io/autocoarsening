@@ -38,12 +38,14 @@ private:
   void scaleNDRange();
   void scaleSizes();
   void scaleIds();
+  void scaleIdsThreadLevelCoarsening();
 
   // Coarsening.
   void coarsenFunction();
   void replicateInst(Instruction *inst);
   void updatePlaceholderMap(Instruction *inst, InstVector &coarsenedInsts);
 
+  void replicateGlobal(GlobalVariable *gv);
   void replicateRegion(DivergentRegion *region);
   void replicateRegionClassic(DivergentRegion *region);
 
@@ -99,6 +101,8 @@ private:
   CoarseningMap cMap;
   CoarseningMap phMap;
   Map phReplacementMap;
+  GlobalsSet shMemGlobals;
+  GlobalsCMap shMemGlobalsCMap;
 };
 
 #endif

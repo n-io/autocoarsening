@@ -76,7 +76,7 @@ FILE *fp;
 char *source_str;
 size_t source_size;
 
-int NX = NX_DEFAULT;
+int NX = 60*NX_DEFAULT;
 int NY = NY_DEFAULT;
 
 void compareResults(DATA_TYPE *hz1, DATA_TYPE *hz2) {

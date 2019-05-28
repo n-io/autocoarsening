@@ -22,7 +22,9 @@ cl_int clEnqueueNDRangeKernel(cl_command_queue command_queue,
                               cl_uint num_events_in_wait_list,
                               const cl_event* event_wait_list,
                               cl_event* event) {
+#ifdef __utils_verbose
   std::cerr << "HIJACKED clEnqueueNDRangeKernel HIJACKED\n";
+#endif
 
   // Setup the event to measure the kernel execution time.
   bool isEventNull = (event == NULL);
@@ -63,7 +65,9 @@ cl_command_queue clCreateCommandQueue(cl_context context,
                                       cl_device_id device,
                                       cl_command_queue_properties properties,
                                       cl_int* errcode_ret) {
+#ifdef __utils_verbose
   std::cout << "HIJACKED clCreateCommandQueue HIJACKED\n";
+#endif
 
   // Get pointer to original function calls.
   clCreateCommandQueueFunction originalclCreateCommandQueue;

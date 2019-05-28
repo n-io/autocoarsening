@@ -30,11 +30,11 @@
 #define MAX_SOURCE_SIZE (0x100000)
 
 /* Problem size. */
-# define NI 512
-# define NJ 512
-# define NK 512
-# define NL 512
-# define NM 512
+# define NI 15*128
+# define NJ 15*128
+# define NK 15*128
+# define NL 15*128
+# define NM 15*128
 
 /* Thread block dimensions */
 #define DIM_LOCAL_WORK_GROUP_X 32
@@ -247,37 +247,37 @@ void cl_launch_kernel()
 	if(errcode != CL_SUCCESS) printf("Error in seting arguments\n");
 	// Execute the OpenCL kernel
 
-	errcode = clEnqueueNDRangeKernel(clCommandQue, clKernel1, 2, NULL, globalWorkSize, localWorkSize, 0, NULL, NULL);	
+	errcode = clEnqueueNDRangeKernel(clCommandQue, clKernel1, 2, NULL, globalWorkSize, localWorkSize, 0, NULL, NULL);
 	if(errcode != CL_SUCCESS) printf("Error in launching kernel\n");
 	clEnqueueBarrier(clCommandQue);
 
 	globalWorkSize[0] = (size_t)ceil(((float)NL) / ((float)DIM_LOCAL_WORK_GROUP_X)) * DIM_LOCAL_WORK_GROUP_X;
 	globalWorkSize[1] = (size_t)ceil(((float)NJ) / ((float)DIM_LOCAL_WORK_GROUP_Y)) * DIM_LOCAL_WORK_GROUP_Y;
 
-	errcode =  clSetKernelArg(clKernel2, 0, sizeof(cl_mem), (void *)&c_mem_obj);
-	errcode |= clSetKernelArg(clKernel2, 1, sizeof(cl_mem), (void *)&d_mem_obj);
-	errcode |= clSetKernelArg(clKernel2, 2, sizeof(cl_mem), (void *)&f_mem_obj);
-	errcode |= clSetKernelArg(clKernel2, 3, sizeof(int), (void *)&nj);
-	errcode |= clSetKernelArg(clKernel2, 4, sizeof(int), (void *)&nl);
-	errcode |= clSetKernelArg(clKernel2, 5, sizeof(int), (void *)&nm);
+	errcode =  clSetKernelArg(clKernel1, 0, sizeof(cl_mem), (void *)&c_mem_obj);
+	errcode |= clSetKernelArg(clKernel1, 1, sizeof(cl_mem), (void *)&d_mem_obj);
+	errcode |= clSetKernelArg(clKernel1, 2, sizeof(cl_mem), (void *)&f_mem_obj);
+	errcode |= clSetKernelArg(clKernel1, 3, sizeof(int), (void *)&nj);
+	errcode |= clSetKernelArg(clKernel1, 4, sizeof(int), (void *)&nl);
+	errcode |= clSetKernelArg(clKernel1, 5, sizeof(int), (void *)&nm);
 	if(errcode != CL_SUCCESS) printf("Error in seting arguments\n");
 	// Execute the OpenCL kernel
-	errcode = clEnqueueNDRangeKernel(clCommandQue, clKernel2, 2, NULL, globalWorkSize, localWorkSize, 0, NULL, NULL);	
+	errcode = clEnqueueNDRangeKernel(clCommandQue, clKernel1, 2, NULL, globalWorkSize, localWorkSize, 0, NULL, NULL);
 	if(errcode != CL_SUCCESS) printf("Error in launching kernel\n");
 	clEnqueueBarrier(clCommandQue);
 
 	globalWorkSize[0] = (size_t)ceil(((float)NL) / ((float)DIM_LOCAL_WORK_GROUP_X)) * DIM_LOCAL_WORK_GROUP_X;
 	globalWorkSize[1] = (size_t)ceil(((float)NI) / ((float)DIM_LOCAL_WORK_GROUP_Y)) * DIM_LOCAL_WORK_GROUP_Y;
 
-	errcode =  clSetKernelArg(clKernel3, 0, sizeof(cl_mem), (void *)&e_mem_obj);
-	errcode |= clSetKernelArg(clKernel3, 1, sizeof(cl_mem), (void *)&f_mem_obj);
-	errcode |= clSetKernelArg(clKernel3, 2, sizeof(cl_mem), (void *)&g_mem_obj);
-	errcode |= clSetKernelArg(clKernel3, 3, sizeof(int), (void *)&ni);
-	errcode |= clSetKernelArg(clKernel3, 4, sizeof(int), (void *)&nl);
-	errcode |= clSetKernelArg(clKernel3, 5, sizeof(int), (void *)&nj);
+	errcode =  clSetKernelArg(clKernel1, 0, sizeof(cl_mem), (void *)&e_mem_obj);
+	errcode |= clSetKernelArg(clKernel1, 1, sizeof(cl_mem), (void *)&f_mem_obj);
+	errcode |= clSetKernelArg(clKernel1, 2, sizeof(cl_mem), (void *)&g_mem_obj);
+	errcode |= clSetKernelArg(clKernel1, 3, sizeof(int), (void *)&ni);
+	errcode |= clSetKernelArg(clKernel1, 4, sizeof(int), (void *)&nl);
+	errcode |= clSetKernelArg(clKernel1, 5, sizeof(int), (void *)&nj);
 	if(errcode != CL_SUCCESS) printf("Error in seting arguments\n");
 	// Execute the OpenCL kernel
-	errcode = clEnqueueNDRangeKernel(clCommandQue, clKernel3, 2, NULL, globalWorkSize, localWorkSize, 0, NULL, NULL);	
+	errcode = clEnqueueNDRangeKernel(clCommandQue, clKernel1, 2, NULL, globalWorkSize, localWorkSize, 0, NULL, NULL);
 	if(errcode != CL_SUCCESS) printf("Error in launching kernel\n");
 	clFinish(clCommandQue);
 }
